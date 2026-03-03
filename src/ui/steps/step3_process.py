@@ -63,7 +63,7 @@ class Step3Process(ctk.CTkFrame):
         self.auto_paginate_var = tk.BooleanVar(value=True)
         self.chk_paginate = ctk.CTkCheckBox(
             controls_frame,
-            text="Auto-paginate (500-record batches)",
+            text="Auto-paginate (reload search per batch)",
             variable=self.auto_paginate_var,
             font=("Roboto", 13),
         )
