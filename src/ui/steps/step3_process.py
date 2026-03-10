@@ -143,11 +143,15 @@ class Step3Process(ctk.CTkFrame):
     def safe_log(self, message):
         self.after(0, lambda: self.log(message))
 
-    def safe_update_progress(self, pct, current, total):
+    def safe_update_progress(self, pct, current, total, more_pages=False):
         def _update():
             self.progress_bar.set(pct)
             self.lbl_counter.configure(text=f"{current} / {total} Images")
-            if pct >= 1.0:
+            # Only mark as complete when the backend confirms there are no more
+            # pages to fetch (more_pages=False). Without this guard the UI would
+            # flip the buttons back to idle at pct=1.0 after every full 500-item
+            # page, even while pagination is still running.
+            if pct >= 1.0 and not more_pages:
                  self.lbl_status.configure(text="Completed.")
                  self.btn_start.configure(state="normal")
                  self.btn_stop.configure(state="disabled")
