@@ -438,14 +438,16 @@ class ConfigDialog(ctk.CTkToplevel):
                 models = client.list_models(limit=40)
             except Exception:
                 models = []
-            self._display_groq_models(models)
+            # UI updates must run on the Tk main thread.
+            if self.winfo_exists():
+                self.after(0, lambda m=models: self._display_groq_models(m))
 
         import threading
         threading.Thread(target=worker, daemon=True).start()
 
     def _display_groq_models(self, models):
         # Lazy create a Groq models panel on the Groq tab if not exists (though init_groq_tab creates it now)
-        if not hasattr(self, "_groq_models_list"):
+        if not self.winfo_exists() or not hasattr(self, "_groq_models_list"):
              return 
 
         for w in self._groq_models_list.winfo_children():
