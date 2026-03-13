@@ -445,7 +445,8 @@ class ConfigDialog(ctk.CTkToplevel):
             except Exception:
                 models = []
             # UI updates must run on the Tk main thread.
-            self._schedule_ui_update(lambda m=models: self._display_groq_models(m))
+            if self.winfo_exists():
+                self.after(0, lambda m=models: self._display_groq_models(m))
 
         self._worker.submit_replacing("groq_models", worker)
 
