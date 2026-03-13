@@ -426,6 +426,12 @@ class ConfigDialog(ctk.CTkToplevel):
         self._cerebras_models_loaded = False
         self.after(1800, self._load_and_display_cerebras_models)
 
+    def _schedule_ui_update(self, callback):
+        """Schedule a callback on the UI thread only while dialog exists."""
+        if not self.winfo_exists():
+            return
+        self.after(0, lambda: callback() if self.winfo_exists() else None)
+
     # Groq auto-load methods moved to ConfigDialog
 
     def _load_and_display_groq_models(self):
@@ -438,14 +444,14 @@ class ConfigDialog(ctk.CTkToplevel):
                 models = client.list_models(limit=40)
             except Exception:
                 models = []
-            self._display_groq_models(models)
+            # UI updates must run on the Tk main thread.
+            self._schedule_ui_update(lambda m=models: self._display_groq_models(m))
 
-        import threading
-        threading.Thread(target=worker, daemon=True).start()
+        self._worker.submit_replacing("groq_models", worker)
 
     def _display_groq_models(self, models):
         # Lazy create a Groq models panel on the Groq tab if not exists (though init_groq_tab creates it now)
-        if not hasattr(self, "_groq_models_list"):
+        if not self.winfo_exists() or not hasattr(self, "_groq_models_list"):
              return 
 
         for w in self._groq_models_list.winfo_children():
@@ -711,25 +717,26 @@ class ConfigDialog(ctk.CTkToplevel):
                 client = OllamaClient(host=host, api_key=key)
 
                 if not client.is_available():
-                    self.after(0, lambda: self._display_ollama_models([]))
+                    self._schedule_ui_update(lambda: self._display_ollama_models([]))
                     return
 
                 models = client.list_models()
-                self.after(0, lambda m=models: self._display_ollama_models(m))
+                self._schedule_ui_update(lambda m=models: self._display_ollama_models(m))
 
             except Exception as e:
-                self.after(
-                    0,
+                self._schedule_ui_update(
                     lambda err=str(e): self._ollama_status.configure(
                         text=f"Error: {err}", text_color="red"
                     )
                 )
 
-        import threading
-        threading.Thread(target=worker, daemon=True).start()
+        self._worker.submit_replacing("ollama_models", worker)
 
     def _display_ollama_models(self, models):
         """Display Ollama models in the scrollable list."""
+        if not self.winfo_exists() or not hasattr(self, "_ollama_models_list"):
+            return
+
         for w in self._ollama_models_list.winfo_children():
             w.destroy()
 
@@ -890,25 +897,26 @@ class ConfigDialog(ctk.CTkToplevel):
                 client = NvidiaClient(api_key=key)
 
                 if not client.is_available():
-                    self.after(0, lambda: self._display_nvidia_models([]))
+                    self._schedule_ui_update(lambda: self._display_nvidia_models([]))
                     return
 
                 models = client.list_models()
-                self.after(0, lambda m=models: self._display_nvidia_models(m))
+                self._schedule_ui_update(lambda m=models: self._display_nvidia_models(m))
 
             except Exception as e:
-                self.after(
-                    0,
+                self._schedule_ui_update(
                     lambda err=str(e): self._nvidia_status.configure(
                         text=f"Error: {err}", text_color="red"
                     )
                 )
 
-        import threading
-        threading.Thread(target=worker, daemon=True).start()
+        self._worker.submit_replacing("nvidia_models", worker)
 
     def _display_nvidia_models(self, models):
         """Display Nvidia models in the scrollable list."""
+        if not self.winfo_exists() or not hasattr(self, "_nvidia_models_list"):
+            return
+
         for w in self._nvidia_models_list.winfo_children():
             w.destroy()
 
@@ -1066,25 +1074,26 @@ class ConfigDialog(ctk.CTkToplevel):
                 client = GoogleAIClient(api_key=key)
 
                 if not client.is_available():
-                    self.after(0, lambda: self._display_google_ai_models([]))
+                    self._schedule_ui_update(lambda: self._display_google_ai_models([]))
                     return
 
                 models = client.list_models()
-                self.after(0, lambda m=models: self._display_google_ai_models(m))
+                self._schedule_ui_update(lambda m=models: self._display_google_ai_models(m))
 
             except Exception as e:
-                self.after(
-                    0,
+                self._schedule_ui_update(
                     lambda err=str(e): self._google_ai_status.configure(
                         text=f"Error: {err}", text_color="red"
                     )
                 )
 
-        import threading
-        threading.Thread(target=worker, daemon=True).start()
+        self._worker.submit_replacing("google_ai_models", worker)
 
     def _display_google_ai_models(self, models):
         """Display Google AI models in the scrollable list."""
+        if not self.winfo_exists() or not hasattr(self, "_google_ai_models_list"):
+            return
+
         for w in self._google_ai_models_list.winfo_children():
             w.destroy()
 
@@ -1247,20 +1256,21 @@ class ConfigDialog(ctk.CTkToplevel):
                 from src.integrations.cerebras_client import CerebrasClient
                 client = CerebrasClient(api_key=key)
                 models = client.list_models(limit=40)
-                self.after(0, lambda m=models: self._display_cerebras_models(m))
+                self._schedule_ui_update(lambda m=models: self._display_cerebras_models(m))
             except Exception as exc:
-                self.after(
-                    0,
+                self._schedule_ui_update(
                     lambda err=str(exc): self._cerebras_status.configure(
                         text=f"Error: {err}", text_color="red"
-                    ),
+                    )
                 )
 
-        import threading
-        threading.Thread(target=worker, daemon=True).start()
+        self._worker.submit_replacing("cerebras_models", worker)
 
     def _display_cerebras_models(self, models):
         """Display Cerebras models in the scrollable list."""
+        if not self.winfo_exists() or not hasattr(self, "_cerebras_models_list"):
+            return
+
         for w in self._cerebras_models_list.winfo_children():
             w.destroy()
 
