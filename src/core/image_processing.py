@@ -556,9 +556,10 @@ def extract_tags_from_result(
                         # Look for dictionary-like structure
                         dict_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text, re.DOTALL)
                         if dict_match:
+                            from src.utils.json_utils import safe_parse_python_literal
                             try:
                                 dict_str = dict_match.group(0).strip()
-                                data = ast.literal_eval(dict_str)
+                                data = safe_parse_python_literal(dict_str)
                                 if isinstance(data, dict):
                                     description = data.get('description', '')
                                     category = data.get('category', '')

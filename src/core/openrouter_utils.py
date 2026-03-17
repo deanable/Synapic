@@ -425,10 +425,10 @@ def run_inference_api(
                     outputs = json.loads(cleaned_content)
                 except json.JSONDecodeError:
                     # Models sometimes return Python-style dict strings with single quotes
-                    # Try ast.literal_eval as fallback
-                    import ast
+                    # Try safe_parse_python_literal as fallback
+                    from src.utils.json_utils import safe_parse_python_literal
                     try:
-                        parsed = ast.literal_eval(cleaned_content)
+                        parsed = safe_parse_python_literal(cleaned_content)
                         if isinstance(parsed, dict):
                             outputs = parsed
                         else:
