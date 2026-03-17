@@ -22,7 +22,6 @@ import customtkinter as ctk
 import os
 import subprocess
 import platform
-from pathlib import Path
 
 class Step4Results(ctk.CTkFrame):
     """
@@ -155,10 +154,6 @@ class Step4Results(ctk.CTkFrame):
 
     def _open_path(self, path):
         """Helper to open file or folder."""
-        import subprocess
-        import os
-        import platform
-        
         system = platform.system()
         if system == 'Windows':
             os.startfile(path)
