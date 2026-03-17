@@ -342,6 +342,8 @@ class ProcessingManager:
                 # ============================================================
                 # PROCESS EACH ITEM IN THIS PAGE
                 # ============================================================
+                processed_before_batch = self.session.processed_items
+                # ============================================================
                 for i, item in enumerate(items):
                     if self.stop_event.is_set():
                         self.logger.info(
@@ -392,7 +394,30 @@ class ProcessingManager:
                     break
 
                 # Advance to next page
-                offset += DAMINION_PAGE_SIZE
+                ds = self.session.datasource
+                is_consuming_results = (
+                    ds.type == "daminion" and
+                    (getattr(ds, 'daminion_untagged_keywords', False) or
+                     getattr(ds, 'daminion_untagged_categories', False) or
+                     getattr(ds, 'daminion_untagged_description', False))
+                )
+
+                if is_consuming_results:
+                    # When filtering for untagged items, processing removes them from the
+                    # result set. Thus, the next page of untagged items shifts into
+                    # the current offset. We only advance the offset by the number of
+                    # items that FAILED to process (since they remain untagged and stay in results).
+                    failed_in_batch = page_count - (self.session.processed_items - processed_before_batch)
+                    offset += max(0, failed_in_batch)
+
+                    self.logger.debug(
+                        f"Consuming results mode: advanced offset by {failed_in_batch} "
+                        f"(failed items). New offset={offset}"
+                    )
+                else:
+                    # Standard pagination: advance by page size
+                    offset += DAMINION_PAGE_SIZE
+
                 del items  # Free before fetching next page
 
             # ================================================================
