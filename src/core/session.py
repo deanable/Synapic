@@ -124,6 +124,7 @@ class EngineConfig:
 
     # Ollama integration settings
     ollama_host: str = "http://localhost:11434"  # Ollama server host URL
+    ollama_api_key: str = ""  # Ollama API key for authentication
 
     # Index for Groq API key rotation (not persisted)
     groq_current_key_index: int = 0

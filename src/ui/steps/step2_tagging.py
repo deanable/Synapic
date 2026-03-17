@@ -77,9 +77,30 @@ class Step2Tagging(ctk.CTkFrame):
         self.create_engine_card(self.cards_frame, "Google AI", "google_ai", 6)
         self.create_engine_card(self.cards_frame, "Cerebras", "cerebras", 7)
 
-        # Configure Button (renamed to "Select Engine")
-        self.btn_config = ctk.CTkButton(self.container, text="Select Engine", command=self.open_config_dialog, width=200)
-        self.btn_config.grid(row=2, column=0, pady=20)
+        # Inline Config Container
+        self.session = self.controller.session
+        self._worker = BackgroundWorker(name="Step2Worker")
+        self.config_container = ctk.CTkFrame(self.container, fg_color="transparent")
+        self.config_container.grid(row=2, column=0, pady=5, sticky="ew")
+        self.config_container.grid_columnconfigure(0, weight=1)
+
+        self.tab_local = ctk.CTkFrame(self.config_container, fg_color="transparent")
+        self.tab_hf = ctk.CTkFrame(self.config_container, fg_color="transparent")
+        self.tab_or = ctk.CTkFrame(self.config_container, fg_color="transparent")
+        self.tab_groq = ctk.CTkFrame(self.config_container, fg_color="transparent")
+        self.tab_ollama = ctk.CTkFrame(self.config_container, fg_color="transparent")
+        self.tab_nvidia = ctk.CTkFrame(self.config_container, fg_color="transparent")
+        self.tab_google_ai = ctk.CTkFrame(self.config_container, fg_color="transparent")
+        self.tab_cerebras = ctk.CTkFrame(self.config_container, fg_color="transparent")
+
+        self.init_local_tab()
+        self.init_hf_tab()
+        self.init_or_tab()
+        self.init_groq_tab()
+        self.init_ollama_tab()
+        self.init_nvidia_tab()
+        self.init_google_ai_tab()
+        self.init_cerebras_tab()
         
         # === Model Info Section ===
         model_info_frame = ctk.CTkFrame(self.container, fg_color="#2B2B2B", corner_radius=10)
@@ -197,8 +218,8 @@ class Step2Tagging(ctk.CTkFrame):
         ctk.CTkButton(nav_frame, text="Next Step", command=self.next_step, width=200, height=40).pack(side="right", padx=20)
 
         # Traces for color coding
-        self.engine_var.trace_add("write", lambda *args: self.update_config_button_color())
-        self.update_config_button_color()
+        self.engine_var.trace_add("write", lambda *args: self._on_engine_change())
+        self._on_engine_change()
 
         # (Auto-load of Groq models is handled in the ConfigDialog for the Groq tab)
 
@@ -234,79 +255,53 @@ class Step2Tagging(ctk.CTkFrame):
         self.controller.session.engine.device = value
         print(f"Device changed to: {value}")
 
-    def update_config_button_color(self):
+    def _on_engine_change(self):
         engine = self.engine_var.get()
-        is_ready = False
-        
+        # Hide all frames
+        for frame in [self.tab_local, self.tab_hf, self.tab_or, self.tab_groq, self.tab_ollama, self.tab_nvidia, self.tab_google_ai, self.tab_cerebras]:
+            frame.grid_forget()
+            
+        # Show the correct frame
         if engine == "local":
-            try:
-                from src.core import huggingface_utils
-                local_models = huggingface_utils.find_local_models()
-                is_ready = len(local_models) > 0
-            except:
-                is_ready = False
+            self.tab_local.grid(row=0, column=0, sticky="nsew")
         elif engine == "huggingface":
-            # Check if key exists in session
-            is_ready = bool(self.controller.session.engine.api_key)
+            self.tab_hf.grid(row=0, column=0, sticky="nsew")
         elif engine == "openrouter":
-            is_ready = bool(self.controller.session.engine.api_key)
+            self.tab_or.grid(row=0, column=0, sticky="nsew")
         elif engine == "groq_package":
-            # Check if Groq SDK is available and API key is set
-            import os
-            try:
-                from src.integrations.groq_package_client import GroqPackageClient
-                groq_key = self.controller.session.engine.groq_api_key
-                client = GroqPackageClient(api_key=groq_key)
-                # Ready if SDK is available AND (API key in env OR model is set)
-                # We check directly in session for API key
-                api_key_set = bool(self.controller.session.engine.groq_api_key)
-                is_ready = client.is_available() and api_key_set
-            except:
-                is_ready = False
+            self.tab_groq.grid(row=0, column=0, sticky="nsew")
+            if not getattr(self, '_groq_models_loaded', False):
+                self._load_and_display_groq_models()
+                self._groq_models_loaded = True
         elif engine == "ollama":
-            # Ollama: check availability with configured host
-            try:
-                from src.integrations.ollama_client import OllamaClient
-                host = self.controller.session.engine.ollama_host
-                key = self.controller.session.engine.ollama_api_key
-                client = OllamaClient(host=host, api_key=key)
-                is_ready = client.is_available()
-            except:
-                is_ready = False
+            self.tab_ollama.grid(row=0, column=0, sticky="nsew")
+            if not getattr(self, '_ollama_models_loaded', False):
+                self._load_and_display_ollama_models()
+                self._ollama_models_loaded = True
         elif engine == "nvidia":
-            # Nvidia: check if API key is set
-            is_ready = bool(self.controller.session.engine.nvidia_api_key)
+            self.tab_nvidia.grid(row=0, column=0, sticky="nsew")
+            if not getattr(self, '_nvidia_models_loaded', False):
+                self._load_and_display_nvidia_models()
+                self._nvidia_models_loaded = True
         elif engine == "google_ai":
-            # Google AI: check if API key is set
-            is_ready = bool(self.controller.session.engine.google_ai_api_key)
+            self.tab_google_ai.grid(row=0, column=0, sticky="nsew")
+            if not getattr(self, '_google_ai_models_loaded', False):
+                self._load_and_display_google_ai_models()
+                self._google_ai_models_loaded = True
         elif engine == "cerebras":
-            # Cerebras: check if API key is set
-            is_ready = bool(self.controller.session.engine.cerebras_api_key)
-        if is_ready:
-            self.btn_config.configure(fg_color="#2FA572", hover_color="#288E62") # Green
-        else:
-            self.btn_config.configure(fg_color="#E74C3C", hover_color="#C0392B") # Red
+            self.tab_cerebras.grid(row=0, column=0, sticky="nsew")
+            if not getattr(self, '_cerebras_models_loaded', False):
+                self._load_and_display_cerebras_models()
+                self._cerebras_models_loaded = True
 
-    # Auto-load handler for Groq tab (handled in ConfigDialog)
+    def _apply_config(self):
+        self.update_model_info()
 
     def create_engine_card(self, parent, text, value, col):
         card = ctk.CTkRadioButton(parent, text=text, variable=self.engine_var, value=value, font=("Roboto", 16))
         card.grid(row=0, column=col, padx=20, pady=20)
         
-    def open_config_dialog(self):
-        """
-        Open the modal configuration dialog.
-        
-        The dialog content dynamically changes based on the currently selected 
-        engine provider (Local, HF, or OpenRouter).
-        """
-        engine = self.engine_var.get()
-        # Open the main configuration dialog (Groq, HF, OpenRouter, Local all via ConfigDialog)
-        dialog = ConfigDialog(self, self.controller.session, initial_tab=engine)
-        self.wait_window(dialog)
-        self.update_config_button_color()
-        self.update_model_info()
-        
+            
     def update_model_info(self):
         """Update the model info label after configuration changes."""
         self.model_info_label.configure(text=self._get_model_display_text())
@@ -335,7 +330,7 @@ class Step2Tagging(ctk.CTkFrame):
         """
         # Sync engine provider radio button with session
         self.engine_var.set(self.controller.session.engine.provider or "huggingface")
-        self.update_config_button_color()
+        self._on_engine_change()
         self.update_model_info()
         # Update device and threshold from session
         self.device_var.set(self.controller.session.engine.device)
@@ -343,88 +338,6 @@ class Step2Tagging(ctk.CTkFrame):
         self.threshold_value_label.configure(text=f"{self.controller.session.engine.confidence_threshold}%")
 
 
-
-class ConfigDialog(ctk.CTkToplevel):
-    """
-    Modal dialog for detailed AI engine configuration.
-    
-    Contains tabs for Local model selection, Hugging Face API setup, and 
-    OpenRouter gateway settings. It allows users to browseHub, test APIs,
-    and persist credentials to the session.
-    """
-    def __init__(self, parent, session, initial_tab="huggingface"):
-        super().__init__(parent)
-        self.session = session
-        self.title("Select Engine")
-        self.geometry("820x600")
-        
-        # Background worker for thread management (single persistent thread)
-        self._worker = BackgroundWorker(name="ConfigDialogWorker")
-        
-        # Make modal
-        self.transient(parent)
-        self.grab_set()
-        
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(0, weight=1)
-        
-        self.tabview = ctk.CTkTabview(self)
-        self.tabview.grid(row=0, column=0, padx=20, pady=20, sticky="nsew")
-        
-        self.tab_local = self.tabview.add("Local Inference")
-        self.tab_hf = self.tabview.add("Hugging Face")
-        self.tab_or = self.tabview.add("OpenRouter")
-        # Groq tab (optional integration in the config dialog)
-        self.tab_groq = self.tabview.add("Groq")
-        # Ollama tab (official client)
-        self.tab_ollama = self.tabview.add("Ollama")
-        # Nvidia tab
-        self.tab_nvidia = self.tabview.add("Nvidia")
-        # Google AI tab
-        self.tab_google_ai = self.tabview.add("Google AI")
-        # Cerebras tab
-        self.tab_cerebras = self.tabview.add("Cerebras")
-        
-        
-        # Init Tabs
-        self.init_local_tab()
-        self.init_hf_tab()
-        self.init_or_tab()
-        self.init_groq_tab()
-        self.init_ollama_tab()
-        self.init_nvidia_tab()
-        self.init_google_ai_tab()
-        self.init_cerebras_tab()
-        
-        # Select current
-        map_name = {
-            "local": "Local Inference",
-            "huggingface": "Hugging Face",
-            "openrouter": "OpenRouter",
-            "groq": "Groq",
-            "groq_package": "Groq",
-            "ollama_free": "Ollama",
-            "ollama": "Ollama",
-            "nvidia": "Nvidia",
-            "google_ai": "Google AI",
-            "cerebras": "Cerebras",
-        }
-        self.tabview.set(map_name.get(initial_tab, "Hugging Face"))
-        # Auto-load Groq models when the Groq tab is opened (delay 1000ms)
-        self._groq_models_loaded = False
-        self.after(1000, self._load_and_display_groq_models)
-        # Auto-load Ollama models (delay 1200ms to stagger with Groq)
-        self._ollama_models_loaded = False
-        self.after(1200, self._load_and_display_ollama_models)
-        # Auto-load Nvidia models (delay 1400ms)
-        self._nvidia_models_loaded = False
-        self.after(1400, self._load_and_display_nvidia_models)
-        # Auto-load Google AI models (delay 1600ms)
-        self._google_ai_models_loaded = False
-        self.after(1600, self._load_and_display_google_ai_models)
-        # Auto-load Cerebras models (delay 1800ms)
-        self._cerebras_models_loaded = False
-        self.after(1800, self._load_and_display_cerebras_models)
 
     def _schedule_ui_update(self, callback):
         """Schedule a callback on the UI thread only while dialog exists."""
@@ -614,7 +527,7 @@ class ConfigDialog(ctk.CTkToplevel):
 
         key_info = f"{len(keys)} key{'s' if len(keys) > 1 else ''}"
         self.groq_status.configure(text=f"Groq config saved ({key_info})", text_color="green")
-        self.destroy()
+        self._apply_config()
     
     # ================================================================
     # OLLAMA API TAB METHODS
@@ -817,7 +730,7 @@ class ConfigDialog(ctk.CTkToplevel):
         self._ollama_status.configure(
             text=f"Saved: {model_id}", text_color="green"
         )
-        self.destroy()
+        self._apply_config()
 
     # ================================================================
     # NVIDIA NIM TAB METHODS
@@ -994,7 +907,7 @@ class ConfigDialog(ctk.CTkToplevel):
         self._nvidia_status.configure(
             text=f"Saved: {model_id}", text_color="green"
         )
-        self.destroy()
+        self._apply_config()
 
     # ================================================================
     # GOOGLE AI STUDIO TAB METHODS
@@ -1171,7 +1084,7 @@ class ConfigDialog(ctk.CTkToplevel):
         self._google_ai_status.configure(
             text=f"Saved: {model_id}", text_color="green"
         )
-        self.destroy()
+        self._apply_config()
 
     # ================================================================
     # CEREBRAS INFERENCE TAB METHODS
@@ -1350,7 +1263,7 @@ class ConfigDialog(ctk.CTkToplevel):
         self._cerebras_status.configure(
             text=f"Saved: {model_id}", text_color="green"
         )
-        self.destroy()
+        self._apply_config()
 
     # ================================================================
     # CLEANUP
@@ -1526,7 +1439,7 @@ class ConfigDialog(ctk.CTkToplevel):
                 print(f"Setting task for {self.session.engine.model_id} to {self.session.engine.task}")
         except:
             pass
-        self.destroy()
+        self._apply_config()
 
     def validate_model_id(self, model_id, provider):
         """Basic validation to prevent using OR models with HF engine and vice versa."""
@@ -1851,7 +1764,7 @@ class ConfigDialog(ctk.CTkToplevel):
         else:
              self.session.engine.task = "image-to-text"
              
-        self.destroy()
+        self._apply_config()
 
     def save_or(self):
         model_id = self.or_model.get().strip()
@@ -1875,7 +1788,7 @@ class ConfigDialog(ctk.CTkToplevel):
         # OpenRouter is primarily chat/generation -> image-to-text task in our logical mapping
         # But could be zero-shot if we prompt it right. For now, default to image-to-text (captioning/describe)
         self.session.engine.task = "image-to-text" 
-        self.destroy()
+        self._apply_config()
 
 
 
@@ -2060,7 +1973,7 @@ class DownloadManagerDialog(ctk.CTkToplevel):
 
     def test_via_api(self, model_id):
         # Switch to HF tab in parent and select model
-        self.parent.tabview.set("Hugging Face")
+        self.parent.engine_var.set("huggingface")
         self.parent.hf_model.delete(0, "end")
         self.parent.hf_model.insert(0, model_id)
         # self.parent.hf_task_var.set(self.task_var.get()) # Task var removed from HF tab
