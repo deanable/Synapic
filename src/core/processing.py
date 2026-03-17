@@ -402,6 +402,8 @@ class ProcessingManager:
                 # ============================================================
                 # PROCESS EACH ITEM IN THIS PAGE
                 # ============================================================
+                processed_before_batch = self.session.processed_items
+                # ============================================================
                 for i, item in enumerate(items):
                     if self.stop_event.is_set():
                         self.logger.info(
