@@ -126,6 +126,15 @@ class EngineConfig:
     ollama_host: str = "http://localhost:11434"  # Ollama server host URL
     ollama_api_key: str = ""  # Ollama API key for authentication
 
+    # Step 2 UI preferences
+    groq_image_models_only: bool = False
+    ollama_image_models_only: bool = False
+    nvidia_image_models_only: bool = False
+    google_ai_image_models_only: bool = False
+    cerebras_image_models_only: bool = False
+    huggingface_image_models_only: bool = False
+    openrouter_image_models_only: bool = False
+
     # Index for Groq API key rotation (not persisted)
     groq_current_key_index: int = 0
 

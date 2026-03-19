@@ -32,6 +32,7 @@ except Exception:
 import customtkinter as ctk
 from src.utils.background_worker import BackgroundWorker
 from src.utils.concurrency import DaemonThreadPoolExecutor
+from src.utils.registry_config import load_ui_preferences, save_ui_preferences
 
 class Step2Tagging(ctk.CTkFrame):
     """
@@ -82,6 +83,14 @@ class Step2Tagging(ctk.CTkFrame):
         # Inline Config Container
         self.session = self.controller.session
         self._worker = BackgroundWorker(name="Step2Worker")
+        self._groq_models_cache = []
+        self._ollama_models_cache = []
+        self._nvidia_models_cache = []
+        self._google_ai_models_cache = []
+        self._cerebras_models_cache = []
+        self._hf_results_cache = []
+        self._or_models_cache = []
+        self._load_registry_ui_preferences()
         self.config_container = ctk.CTkFrame(self.container, fg_color="transparent")
         self.config_container.grid(row=2, column=0, pady=5, sticky="ew")
         self.config_container.grid_columnconfigure(0, weight=1)
@@ -349,6 +358,55 @@ class Step2Tagging(ctk.CTkFrame):
             return
         self.after(0, lambda: callback() if self.winfo_exists() else None)
 
+    def _load_registry_ui_preferences(self):
+        """Overlay UI preference defaults from the Windows Registry."""
+        try:
+            prefs = load_ui_preferences()
+        except Exception:
+            prefs = {}
+
+        for key, value in prefs.items():
+            if hasattr(self.session.engine, key):
+                setattr(self.session.engine, key, bool(value))
+
+    def _persist_image_filter_preference(self, attr_name: str, value: bool):
+        """Persist a single model-filter checkbox state to session + registry."""
+        setattr(self.session.engine, attr_name, bool(value))
+        save_ui_preferences({attr_name: bool(value)})
+
+    def _model_supports_image(self, model) -> bool:
+        """Heuristic check for image-capable models across providers."""
+        markers = (
+            "vision", "image", "visual", "multimodal", "multi-modal",
+            "image-to-text", "image-text-to-text", "visual-question-answering",
+            "llava", "gemini", "phi-3-vision", "vl", "scout", "maverick"
+        )
+
+        texts = []
+        if isinstance(model, dict):
+            texts.extend([
+                model.get("id", ""),
+                model.get("model_id", ""),
+                model.get("capability", ""),
+                model.get("task", ""),
+                model.get("family", ""),
+            ])
+        else:
+            texts.append(str(model))
+
+        for text in texts:
+            text_lower = str(text).lower()
+            if any(marker in text_lower for marker in markers):
+                return True
+        return False
+
+    def _filter_image_models(self, models, enabled: bool):
+        """Return only image-capable models when the checkbox is enabled."""
+        model_list = list(models or [])
+        if not enabled:
+            return model_list
+        return [model for model in model_list if self._model_supports_image(model)]
+
     # Groq auto-load methods moved to ConfigDialog
 
     def _load_and_display_groq_models(self):
@@ -367,10 +425,15 @@ class Step2Tagging(ctk.CTkFrame):
 
         self._worker.submit_replacing("groq_models", worker)
 
-    def _display_groq_models(self, models):
+    def _display_groq_models(self, models, update_cache=True):
         # Lazy create a Groq models panel on the Groq tab if not exists (though init_groq_tab creates it now)
         if not self.winfo_exists() or not hasattr(self, "_groq_models_list"):
              return 
+
+        if update_cache:
+            self._groq_models_cache = list(models or [])
+        raw_models = list(self._groq_models_cache)
+        models = self._filter_image_models(raw_models, self.groq_image_only_var.get())
 
         for w in self._groq_models_list.winfo_children():
             w.destroy()
@@ -385,8 +448,15 @@ class Step2Tagging(ctk.CTkFrame):
             anchor="w"
         ).pack(fill="x", pady=(5, 10), padx=5)
 
-        if not models:
+        if not raw_models:
             ctk.CTkLabel(self._groq_models_list, text="No Groq models found (check API key?).", text_color="gray").pack()
+            return
+        if not models:
+            ctk.CTkLabel(
+                self._groq_models_list,
+                text="No image-capable Groq models matched the current filter.",
+                text_color="gray"
+            ).pack()
             return
 
         for m in models:
@@ -467,6 +537,16 @@ class Step2Tagging(ctk.CTkFrame):
         row_status.grid(row=1, column=0, sticky="ew", padx=10, pady=0)
         self.groq_status = ctk.CTkLabel(row_status, text="", text_color="gray")
         self.groq_status.pack(side="left")
+        self.groq_image_only_var = ctk.BooleanVar(value=self.session.engine.groq_image_models_only)
+        ctk.CTkCheckBox(
+            row_status,
+            text="List image models only",
+            variable=self.groq_image_only_var,
+            command=lambda: (
+                self._persist_image_filter_preference("groq_image_models_only", self.groq_image_only_var.get()),
+                self._display_groq_models(self._groq_models_cache, update_cache=False)
+            ),
+        ).pack(side="right")
 
         # List
         self._groq_models_list = ctk.CTkScrollableFrame(self.tab_groq, label_text="Available Groq Models")
@@ -594,6 +674,16 @@ class Step2Tagging(ctk.CTkFrame):
         ).pack(side="left", padx=2)
         self._ollama_status = ctk.CTkLabel(key_btn_frame, text="", text_color="gray")
         self._ollama_status.pack(side="left", padx=6)
+        self.ollama_image_only_var = ctk.BooleanVar(value=self.session.engine.ollama_image_models_only)
+        ctk.CTkCheckBox(
+            config_frame,
+            text="List image models only",
+            variable=self.ollama_image_only_var,
+            command=lambda: (
+                self._persist_image_filter_preference("ollama_image_models_only", self.ollama_image_only_var.get()),
+                self._display_ollama_models(self._ollama_models_cache, update_cache=False)
+            ),
+        ).grid(row=2, column=1, sticky="w", padx=5, pady=(6, 0))
 
         # Models list
         self._ollama_models_list = ctk.CTkScrollableFrame(
@@ -650,10 +740,15 @@ class Step2Tagging(ctk.CTkFrame):
 
         self._worker.submit_replacing("ollama_models", worker)
 
-    def _display_ollama_models(self, models):
+    def _display_ollama_models(self, models, update_cache=True):
         """Display Ollama models in the scrollable list."""
         if not self.winfo_exists() or not hasattr(self, "_ollama_models_list"):
             return
+
+        if update_cache:
+            self._ollama_models_cache = list(models or [])
+        raw_models = list(self._ollama_models_cache)
+        models = self._filter_image_models(raw_models, self.ollama_image_only_var.get())
 
         for w in self._ollama_models_list.winfo_children():
             w.destroy()
@@ -668,7 +763,7 @@ class Step2Tagging(ctk.CTkFrame):
             anchor="w"
         ).pack(fill="x", pady=(5, 10), padx=5)
 
-        if not models:
+        if not raw_models:
             ctk.CTkLabel(
                 self._ollama_models_list,
                 text="No models found or connection failed.\n"
@@ -678,9 +773,22 @@ class Step2Tagging(ctk.CTkFrame):
             ).pack(pady=20)
             self._ollama_status.configure(text="Connection Failed", text_color="red")
             return
+        if not models:
+            ctk.CTkLabel(
+                self._ollama_models_list,
+                text="No image-capable Ollama models matched the current filter.",
+                text_color="gray",
+                justify="center"
+            ).pack(pady=20)
+            self._ollama_status.configure(text="0 image models shown", text_color="orange")
+            return
 
         self._ollama_status.configure(
-            text=f"{len(models)} models found",
+            text=(
+                f"{len(models)} of {len(raw_models)} models shown"
+                if self.ollama_image_only_var.get()
+                else f"{len(models)} models found"
+            ),
             text_color="#2FA572"
         )
 
@@ -775,6 +883,16 @@ class Step2Tagging(ctk.CTkFrame):
         
         self._nvidia_status = ctk.CTkLabel(row_key, text="", text_color="gray")
         self._nvidia_status.grid(row=0, column=3, padx=10)
+        self.nvidia_image_only_var = ctk.BooleanVar(value=self.session.engine.nvidia_image_models_only)
+        ctk.CTkCheckBox(
+            row_key,
+            text="List image models only",
+            variable=self.nvidia_image_only_var,
+            command=lambda: (
+                self._persist_image_filter_preference("nvidia_image_models_only", self.nvidia_image_only_var.get()),
+                self._display_nvidia_models(self._nvidia_models_cache, update_cache=False)
+            ),
+        ).grid(row=1, column=1, sticky="w", padx=5, pady=(6, 0))
 
         # Models list
         self._nvidia_models_list = ctk.CTkScrollableFrame(
@@ -830,10 +948,15 @@ class Step2Tagging(ctk.CTkFrame):
 
         self._worker.submit_replacing("nvidia_models", worker)
 
-    def _display_nvidia_models(self, models):
+    def _display_nvidia_models(self, models, update_cache=True):
         """Display Nvidia models in the scrollable list."""
         if not self.winfo_exists() or not hasattr(self, "_nvidia_models_list"):
             return
+
+        if update_cache:
+            self._nvidia_models_cache = list(models or [])
+        raw_models = list(self._nvidia_models_cache)
+        models = self._filter_image_models(raw_models, self.nvidia_image_only_var.get())
 
         for w in self._nvidia_models_list.winfo_children():
             w.destroy()
@@ -848,7 +971,7 @@ class Step2Tagging(ctk.CTkFrame):
             anchor="w"
         ).pack(fill="x", pady=(5, 10), padx=5)
 
-        if not models:
+        if not raw_models:
             ctk.CTkLabel(
                 self._nvidia_models_list,
                 text="No models found or connection failed.\n"
@@ -858,9 +981,22 @@ class Step2Tagging(ctk.CTkFrame):
             ).pack(pady=20)
             self._nvidia_status.configure(text="Connection Failed", text_color="red")
             return
+        if not models:
+            ctk.CTkLabel(
+                self._nvidia_models_list,
+                text="No image-capable NVIDIA models matched the current filter.",
+                text_color="gray",
+                justify="center"
+            ).pack(pady=20)
+            self._nvidia_status.configure(text="0 image models shown", text_color="orange")
+            return
 
         self._nvidia_status.configure(
-            text=f"{len(models)} models found",
+            text=(
+                f"{len(models)} of {len(raw_models)} models shown"
+                if self.nvidia_image_only_var.get()
+                else f"{len(models)} models found"
+            ),
             text_color="#2FA572"
         )
 
@@ -952,6 +1088,16 @@ class Step2Tagging(ctk.CTkFrame):
 
         self._google_ai_status = ctk.CTkLabel(row_key, text="", text_color="gray")
         self._google_ai_status.grid(row=0, column=3, padx=10)
+        self.google_ai_image_only_var = ctk.BooleanVar(value=self.session.engine.google_ai_image_models_only)
+        ctk.CTkCheckBox(
+            row_key,
+            text="List image models only",
+            variable=self.google_ai_image_only_var,
+            command=lambda: (
+                self._persist_image_filter_preference("google_ai_image_models_only", self.google_ai_image_only_var.get()),
+                self._display_google_ai_models(self._google_ai_models_cache, update_cache=False)
+            ),
+        ).grid(row=1, column=1, sticky="w", padx=5, pady=(6, 0))
 
         # Models list
         self._google_ai_models_list = ctk.CTkScrollableFrame(
@@ -1007,10 +1153,15 @@ class Step2Tagging(ctk.CTkFrame):
 
         self._worker.submit_replacing("google_ai_models", worker)
 
-    def _display_google_ai_models(self, models):
+    def _display_google_ai_models(self, models, update_cache=True):
         """Display Google AI models in the scrollable list."""
         if not self.winfo_exists() or not hasattr(self, "_google_ai_models_list"):
             return
+
+        if update_cache:
+            self._google_ai_models_cache = list(models or [])
+        raw_models = list(self._google_ai_models_cache)
+        models = self._filter_image_models(raw_models, self.google_ai_image_only_var.get())
 
         for w in self._google_ai_models_list.winfo_children():
             w.destroy()
@@ -1025,7 +1176,7 @@ class Step2Tagging(ctk.CTkFrame):
             anchor="w"
         ).pack(fill="x", pady=(5, 10), padx=5)
 
-        if not models:
+        if not raw_models:
             ctk.CTkLabel(
                 self._google_ai_models_list,
                 text="No models found or connection failed.\n"
@@ -1035,9 +1186,22 @@ class Step2Tagging(ctk.CTkFrame):
             ).pack(pady=20)
             self._google_ai_status.configure(text="Connection Failed", text_color="red")
             return
+        if not models:
+            ctk.CTkLabel(
+                self._google_ai_models_list,
+                text="No image-capable Google AI models matched the current filter.",
+                text_color="gray",
+                justify="center"
+            ).pack(pady=20)
+            self._google_ai_status.configure(text="0 image models shown", text_color="orange")
+            return
 
         self._google_ai_status.configure(
-            text=f"{len(models)} models found",
+            text=(
+                f"{len(models)} of {len(raw_models)} models shown"
+                if self.google_ai_image_only_var.get()
+                else f"{len(models)} models found"
+            ),
             text_color="#2FA572"
         )
 
@@ -1136,6 +1300,16 @@ class Step2Tagging(ctk.CTkFrame):
 
         self._cerebras_status = ctk.CTkLabel(row_key, text="", text_color="gray")
         self._cerebras_status.grid(row=0, column=3, padx=10)
+        self.cerebras_image_only_var = ctk.BooleanVar(value=self.session.engine.cerebras_image_models_only)
+        ctk.CTkCheckBox(
+            row_key,
+            text="List image models only",
+            variable=self.cerebras_image_only_var,
+            command=lambda: (
+                self._persist_image_filter_preference("cerebras_image_models_only", self.cerebras_image_only_var.get()),
+                self._display_cerebras_models(self._cerebras_models_cache, update_cache=False)
+            ),
+        ).grid(row=1, column=1, sticky="w", padx=5, pady=(6, 0))
 
         # Models list
         self._cerebras_models_list = ctk.CTkScrollableFrame(
@@ -1173,6 +1347,13 @@ class Step2Tagging(ctk.CTkFrame):
             try:
                 from src.integrations.cerebras_client import CerebrasClient
                 client = CerebrasClient(api_key=key)
+                if not client.has_sdk():
+                    self._schedule_ui_update(
+                        lambda: self._cerebras_status.configure(
+                            text="SDK missing: install cerebras_cloud_sdk",
+                            text_color="orange",
+                        )
+                    )
                 models = client.list_models(limit=40)
                 self._schedule_ui_update(lambda m=models: self._display_cerebras_models(m))
             except Exception as exc:
@@ -1184,10 +1365,15 @@ class Step2Tagging(ctk.CTkFrame):
 
         self._worker.submit_replacing("cerebras_models", worker)
 
-    def _display_cerebras_models(self, models):
+    def _display_cerebras_models(self, models, update_cache=True):
         """Display Cerebras models in the scrollable list."""
         if not self.winfo_exists() or not hasattr(self, "_cerebras_models_list"):
             return
+
+        if update_cache:
+            self._cerebras_models_cache = list(models or [])
+        raw_models = list(self._cerebras_models_cache)
+        models = self._filter_image_models(raw_models, self.cerebras_image_only_var.get())
 
         for w in self._cerebras_models_list.winfo_children():
             w.destroy()
@@ -1202,7 +1388,7 @@ class Step2Tagging(ctk.CTkFrame):
             anchor="w",
         ).pack(fill="x", pady=(5, 10), padx=5)
 
-        if not models:
+        if not raw_models:
             ctk.CTkLabel(
                 self._cerebras_models_list,
                 text="No models found.\nCheck your API key or network connection.",
@@ -1211,9 +1397,23 @@ class Step2Tagging(ctk.CTkFrame):
             ).pack(pady=20)
             self._cerebras_status.configure(text="No models found", text_color="orange")
             return
+        if not models:
+            ctk.CTkLabel(
+                self._cerebras_models_list,
+                text="No image-capable Cerebras models matched the current filter.",
+                text_color="gray",
+                justify="center",
+            ).pack(pady=20)
+            self._cerebras_status.configure(text="0 image models shown", text_color="orange")
+            return
 
         self._cerebras_status.configure(
-            text=f"{len(models)} models found", text_color="#2FA572"
+            text=(
+                f"{len(models)} of {len(raw_models)} models shown"
+                if self.cerebras_image_only_var.get()
+                else f"{len(models)} models found"
+            ),
+            text_color="#2FA572"
         )
 
         for m in models:
@@ -1264,9 +1464,20 @@ class Step2Tagging(ctk.CTkFrame):
         except Exception:
             pass
 
-        self._cerebras_status.configure(
-            text=f"Saved: {model_id}", text_color="green"
-        )
+        status_text = f"Saved: {model_id}"
+        status_color = "green"
+        try:
+            from src.integrations.cerebras_client import CerebrasClient
+
+            client = CerebrasClient(api_key=key)
+            availability_error = client.availability_error()
+            if availability_error:
+                status_text = f"{status_text} | {availability_error}"
+                status_color = "orange"
+        except Exception:
+            pass
+
+        self._cerebras_status.configure(text=status_text, text_color=status_color)
         self._apply_config()
 
     # ================================================================
@@ -1495,6 +1706,16 @@ class Step2Tagging(ctk.CTkFrame):
         self.hf_search.pack(side="left", fill="x", expand=True, padx=(0,5))
         self.hf_search.bind("<Return>", lambda e: self.search_hf_online())
         ctk.CTkButton(row3, text="Search Hub", width=100, command=self.search_hf_online).pack(side="left")
+        self.hf_image_only_var = ctk.BooleanVar(value=self.session.engine.huggingface_image_models_only)
+        ctk.CTkCheckBox(
+            row3,
+            text="List image models only",
+            variable=self.hf_image_only_var,
+            command=lambda: (
+                self._persist_image_filter_preference("huggingface_image_models_only", self.hf_image_only_var.get()),
+                self.show_hf_results(self._hf_results_cache, update_cache=False)
+            ),
+        ).pack(side="left", padx=10)
 
         # List
         self.hf_list = ctk.CTkScrollableFrame(self.tab_hf, label_text="Recommended Multi-modal Models")
@@ -1592,7 +1813,12 @@ class Step2Tagging(ctk.CTkFrame):
         # Use submit_replacing so rapid searches only execute the final one
         self._worker.submit_replacing("hf_search", worker)
 
-    def show_hf_results(self, results, error=None):
+    def show_hf_results(self, results, error=None, update_cache=True):
+        if update_cache:
+            self._hf_results_cache = list(results or [])
+        raw_results = list(self._hf_results_cache)
+        results = self._filter_image_models(raw_results, self.hf_image_only_var.get())
+
         for w in self.hf_list.winfo_children(): w.destroy()
         
         # Re-add header
@@ -1603,8 +1829,11 @@ class Step2Tagging(ctk.CTkFrame):
             ctk.CTkLabel(self.hf_list, text=f"Error: {error}", text_color="red").pack()
             return
 
-        if not results:
+        if not raw_results:
             ctk.CTkLabel(self.hf_list, text="No models found.").pack()
+            return
+        if not results:
+            ctk.CTkLabel(self.hf_list, text="No image-capable models matched the current filter.").pack()
             return
 
         for item in results:
@@ -1649,6 +1878,16 @@ class Step2Tagging(ctk.CTkFrame):
         self.var_show_paid = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(row2, text="Show Paid Models", variable=self.var_show_paid, 
                         command=self.fetch_or_models).pack(side="left", padx=10)
+        self.or_image_only_var = ctk.BooleanVar(value=self.session.engine.openrouter_image_models_only)
+        ctk.CTkCheckBox(
+            row2,
+            text="List image models only",
+            variable=self.or_image_only_var,
+            command=lambda: (
+                self._persist_image_filter_preference("openrouter_image_models_only", self.or_image_only_var.get()),
+                self.show_or_results(self._or_models_cache, update_cache=False)
+            ),
+        ).pack(side="left", padx=10)
         
         # List
         self.or_list = ctk.CTkScrollableFrame(self.tab_or, label_text="OpenRouter Vision Models")
@@ -1693,11 +1932,12 @@ class Step2Tagging(ctk.CTkFrame):
             try:
                 from src.core import openrouter_utils
                 # We can't really filter by 'task' in the same way, but OR utils handles 'image' modality check
-                models, _ = openrouter_utils.find_models_by_task(
+                model_ids, _ = openrouter_utils.find_models_by_task(
                     "image-to-text", 
                     limit=100,
                     include_paid=self.var_show_paid.get()
                 )
+                models = [{"id": mid, "capability": "Vision", "cost": "Unknown"} for mid in model_ids]
                 self.after(0, lambda: self.show_or_results(models) if self.winfo_exists() else None)
             except Exception as e:
                 error_msg = str(e)
@@ -1706,7 +1946,12 @@ class Step2Tagging(ctk.CTkFrame):
         # Use submit_replacing so rapid fetches only execute the final one
         self._worker.submit_replacing("or_fetch", worker)
 
-    def show_or_results(self, results, error=None):
+    def show_or_results(self, results, error=None, update_cache=True):
+        if update_cache:
+            self._or_models_cache = list(results or [])
+        raw_results = list(self._or_models_cache)
+        results = self._filter_image_models(raw_results, self.or_image_only_var.get())
+
         # Clear list but keep header? Actually cleaner to clear and redraw header in one go if I had separate method, 
         # but here I cleared children in fetch.
         # Let's just clear and redraw header to be safe
@@ -1725,16 +1970,18 @@ class Step2Tagging(ctk.CTkFrame):
             ctk.CTkLabel(self.or_list, text=f"Error: {error}\n(Check internet?)", text_color="red").pack()
             return
         
-        if not results:
+        if not raw_results:
             ctk.CTkLabel(self.or_list, text="No generic vision models found.").pack()
             return
-            
-        for mid in results:
-             # OR results are often just IDs, but check if we have more info
-             # The openrouter_utils.find_models_by_task returns list of strings usually
-             capability = "Vision"
-             cost_str = "Unknown"
+        if not results:
+            ctk.CTkLabel(self.or_list, text="No image-capable OpenRouter models matched the current filter.").pack()
+            return
              
+        for item in results:
+             mid = item.get("id", "")
+             capability = item.get("capability", "Vision")
+             cost_str = item.get("cost", "Unknown")
+              
              display_text = f"{mid:<40} | {capability:^15} | {cost_str:>15}"
 
              btn = ctk.CTkButton(
