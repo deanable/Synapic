@@ -290,7 +290,8 @@ class ProcessingManager:
                 self._api_client = CerebrasClient(api_key=engine.cerebras_api_key)
                 if not self._api_client.is_available():
                     raise RuntimeError(
-                        "Cerebras API key not configured or SDK not installed."
+                        self._api_client.availability_error()
+                        or "Cerebras client is unavailable."
                     )
                 self.logger.info("Cerebras client initialized (reused for all items)")
 

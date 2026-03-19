@@ -92,6 +92,22 @@ class CerebrasClient:
         """Return True when the SDK is installed and an API key has been set."""
         return self.available and bool(self.api_key)
 
+    def has_sdk(self) -> bool:
+        """Return True when the Cerebras SDK import succeeded."""
+        return self.available
+
+    def has_api_key(self) -> bool:
+        """Return True when a non-empty API key has been provided."""
+        return bool(self.api_key)
+
+    def availability_error(self) -> Optional[str]:
+        """Return a user-facing explanation when the client is unavailable."""
+        if not self.has_sdk():
+            return "Cerebras SDK missing. Install it with: pip install cerebras_cloud_sdk"
+        if not self.has_api_key():
+            return "Cerebras API key not configured."
+        return None
+
     # ------------------------------------------------------------------
     # Internal — lazy SDK client
     # ------------------------------------------------------------------
@@ -193,7 +209,8 @@ class CerebrasClient:
             ``"Error:"`` if the call fails irrecoverably.
         """
         if not self.is_available():
-            return "Error: Cerebras API key not configured or SDK not installed."
+            detail = self.availability_error() or "Cerebras client unavailable."
+            return f"Error: {detail}"
 
         if not os.path.exists(image_path):
             return f"Error: Image file not found: {image_path}"
