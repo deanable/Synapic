@@ -4,6 +4,32 @@ All notable changes to the **Synapic** project will be documented in this file.
 
 ---
 
+## [2.3.0] - 2026-03-19
+
+### Added
+- **Core AI Tagging Pipeline**: Added and expanded the main processing pipeline for AI-driven asset tagging, including stronger Daminion pagination support and deeper UI integration.
+- **Cerebras Integration**: Added Cerebras inference support and updated project dependencies to support the new provider stack.
+- **Additional AI Providers**: Added Google AI Studio (Gemini API), NVIDIA, and Ollama Cloud support, broadening available remote and hosted inference options.
+- **Session and Workflow Management**: Introduced core session management, richer data source and AI engine configuration, and a new tagging workflow step for processing assets.
+- **Persistent Model Filters**: Added persistent image-model filtering to provider model lists so vision-capable selections remain easier to manage across sessions.
+- **Expanded Test Coverage**: Added unit tests for `load_image_from_base64`, `get_file_metadata`, `calculate_hamming_distance`, `are_hashes_similar`, `apply_keep_first`, concurrency behavior, UI flows, and pagination-related regressions.
+
+### Changed
+- **Engine Configuration UI**: Continued evolving the Step 2 engine configuration experience with better provider support, safer async model loading, and improved tab handling across providers.
+- **Responsive Layout and Documentation**: Improved layout responsiveness in key screens and expanded inline code documentation and cleanup across the codebase.
+- **Deduplication Workflow**: Enhanced deduplication with threaded progress reporting, metadata-aware behavior, delete-versus-remove controls, inline confirmations, and broader UX refinements.
+- **Resource Management**: Optimized memory and CPU usage for local models, added per-image memory logging, and strengthened cleanup paths across API pipelines.
+
+### Fixed
+- **Engine Dialog Stability**: Fixed render issues after the Groq tab, prevented tab-navigation crashes between Groq and Ollama, and hardened async model loading across provider tabs.
+- **Pagination Reliability**: Fixed early termination during auto-pagination when search results changed and corrected `single_page` handling in the Daminion client.
+- **Processing Robustness**: Resolved an `UnboundLocalError` during abort handling and fixed the batch button state by correctly passing the `more_pages` flag.
+- **Memory Leaks and Shutdown Issues**: Fixed multiple memory leak paths across processing pipelines, improved `pythonw` compatibility, and resolved lingering background-process and logging shutdown issues.
+- **Provider-Specific Issues**: Fixed Groq API quota exhaustion handling, corrected Ollama Cloud authentication for base64 image uploads, filtered provider lists for vision models more accurately, and added the missing `os` import in `logger.py`.
+- **Security Hardening**: Replaced unsafe `literal_eval` usage on untrusted model output.
+
+---
+
 ## [2.2.0] - 2026-02-07
 
 ### Added
@@ -75,6 +101,6 @@ All notable changes to the **Synapic** project will be documented in this file.
 
 ---
 
-## Status: ✅ Production Ready
-**Current Version**: 2.1.0
-**Last Updated**: 2026-01-29
+## Status: Production Ready
+**Current Version**: 2.3.0
+**Last Updated**: 2026-03-19
