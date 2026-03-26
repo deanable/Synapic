@@ -651,28 +651,30 @@ class Step2Tagging(ctk.CTkFrame):
         ctk.CTkButton(
             shortcut_frame, text="Cloud", width=55, height=26,
             font=("Roboto", 10), fg_color="#4B4B4B", hover_color="#5B5B5B",
-            command=lambda: self.ollama_host_var.set("https://ollama.com")
+            command=lambda: self._set_ollama_host_mode("cloud")
         ).pack(side="left", padx=2)
         ctk.CTkButton(
             shortcut_frame, text="Local", width=55, height=26,
             font=("Roboto", 10), fg_color="#4B4B4B", hover_color="#5B5B5B",
-            command=lambda: self.ollama_host_var.set("http://localhost:11434")
+            command=lambda: self._set_ollama_host_mode("local")
         ).pack(side="left", padx=2)
 
         # ── Sub-row 1: API Key + Refresh + Status
-        ctk.CTkLabel(config_frame, text="API Key:").grid(row=1, column=0, padx=(0, 5), pady=(6, 0), sticky="w")
+        self._ollama_key_label = ctk.CTkLabel(config_frame, text="API Key:")
+        self._ollama_key_label.grid(row=1, column=0, padx=(0, 5), pady=(6, 0), sticky="w")
         self.ollama_key_var = ctk.StringVar(value=self.session.engine.ollama_api_key or "")
-        ctk.CTkEntry(config_frame, textvariable=self.ollama_key_var, show="*").grid(
+        self._ollama_key_entry = ctk.CTkEntry(config_frame, textvariable=self.ollama_key_var, show="*")
+        self._ollama_key_entry.grid(
             row=1, column=1, sticky="ew", padx=5, pady=(6, 0)
         )
 
-        key_btn_frame = ctk.CTkFrame(config_frame, fg_color="transparent")
-        key_btn_frame.grid(row=1, column=2, padx=5, pady=(6, 0))
+        self._ollama_key_btn_frame = ctk.CTkFrame(config_frame, fg_color="transparent")
+        self._ollama_key_btn_frame.grid(row=1, column=2, padx=5, pady=(6, 0))
         ctk.CTkButton(
-            key_btn_frame, text="Refresh",
+            self._ollama_key_btn_frame, text="Refresh",
             command=self._load_and_display_ollama_models, width=80
         ).pack(side="left", padx=2)
-        self._ollama_status = ctk.CTkLabel(key_btn_frame, text="", text_color="gray")
+        self._ollama_status = ctk.CTkLabel(self._ollama_key_btn_frame, text="", text_color="gray")
         self._ollama_status.pack(side="left", padx=6)
         self.ollama_image_only_var = ctk.BooleanVar(value=self.session.engine.ollama_image_models_only)
         ctk.CTkCheckBox(
@@ -684,6 +686,8 @@ class Step2Tagging(ctk.CTkFrame):
                 self._display_ollama_models(self._ollama_models_cache, update_cache=False)
             ),
         ).grid(row=2, column=1, sticky="w", padx=5, pady=(6, 0))
+        self.ollama_host_var.trace_add("write", lambda *_: self._update_ollama_auth_visibility())
+        self._update_ollama_auth_visibility()
 
         # Models list
         self._ollama_models_list = ctk.CTkScrollableFrame(
@@ -717,7 +721,7 @@ class Step2Tagging(ctk.CTkFrame):
         """Load models from Ollama server in a background thread."""
         self._ollama_status.configure(text="Connecting...", text_color="gray")
         host = self.ollama_host_var.get().strip()
-        key = self.ollama_key_var.get().strip()
+        key = "" if self._is_local_ollama_host(host) else self.ollama_key_var.get().strip()
 
         def worker():
             try:
@@ -820,7 +824,7 @@ class Step2Tagging(ctk.CTkFrame):
     def _save_ollama_config(self):
         model_id = self._ollama_model_entry.get().strip()
         host = self.ollama_host_var.get().strip()
-        key = self.ollama_key_var.get().strip()
+        key = "" if self._is_local_ollama_host(host) else self.ollama_key_var.get().strip()
         
         if not model_id:
             self._ollama_status.configure(text="Select a model", text_color="red")
@@ -843,6 +847,32 @@ class Step2Tagging(ctk.CTkFrame):
             text=f"Saved: {model_id}", text_color="green"
         )
         self._apply_config()
+
+    def _set_ollama_host_mode(self, mode: str):
+        """Apply a common Ollama host preset."""
+        if mode == "cloud":
+            self.ollama_host_var.set("https://ollama.com")
+        else:
+            self.ollama_host_var.set("http://localhost:11434")
+        self._update_ollama_auth_visibility()
+
+    def _is_local_ollama_host(self, host: str) -> bool:
+        """Return True when the configured Ollama endpoint looks like a local instance."""
+        normalized = (host or "").strip().lower()
+        return any(token in normalized for token in ("localhost", "127.0.0.1", "::1"))
+
+    def _update_ollama_auth_visibility(self):
+        """Hide the API key row when Ollama is configured to use a local host."""
+        if not hasattr(self, "_ollama_key_label"):
+            return
+
+        if self._is_local_ollama_host(self.ollama_host_var.get()):
+            self._ollama_key_label.grid_remove()
+            self._ollama_key_entry.grid_remove()
+            self._ollama_status.configure(text="Local instance detected", text_color="gray")
+        else:
+            self._ollama_key_label.grid()
+            self._ollama_key_entry.grid()
 
     # ================================================================
     # NVIDIA NIM TAB METHODS
