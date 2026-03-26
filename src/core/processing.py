@@ -649,11 +649,14 @@ class ProcessingManager:
         engine = self.session.engine
         
         # Check model compatibility before attempting to load
-        if not huggingface_utils.is_model_compatible(engine.model_id):
-            reason = huggingface_utils.get_incompatibility_reason(engine.model_id)
+        reason = huggingface_utils.get_local_inference_incompatibility_reason(
+            engine.model_id,
+            task=engine.task,
+        )
+        if reason is not None:
             error_msg = (
                 f"Cannot load model '{engine.model_id}': {reason}\n\n"
-                "This model requires special libraries not included in Synapic.\n"
+                "This model is not suitable for Synapic's local inference runtime.\n"
                 "Please select a different model from the local cache."
             )
             self.logger.error(error_msg)
@@ -772,24 +775,41 @@ class ProcessingManager:
                     with Image.open(path) as img:
                          if img.mode != "RGB": img = img.convert("RGB")
                          
-                         # Check if the pipeline is modern image-text-to-text (e.g. Qwen2-VL)
-                         # These models expect chat-style messages with structured prompts
-                         if hasattr(self.model, "task") and self.model.task == "image-text-to-text":
-                             # Construct chat-style prompt as expected by modern VLMs (Qwen2-VL, etc.)
-                             # The prompt requests structured JSON output for easier parsing
-                             messages = [
-                                 {
-                                     "role": "user", 
-                                     "content": [
-                                         {"type": "image", "image": img},
-                                         {"type": "text", "text": "Analyze the image and return a JSON object with keys: 'description' (detailed caption), 'category' (single broad category), and 'keywords' (list of 5-10 tags). Return ONLY the raw JSON string."}
-                                     ]
-                                 }
-                             ]
-                             try:
-                                 # For image-text-to-text pipelines, pass the formatted messages
-                                 # Note: The pipeline will handle the image extraction from the messages
-                                 result = self.model(text=messages, generate_kwargs={"max_new_tokens": 512})
+                          # Check if the pipeline is modern image-text-to-text (e.g. Qwen2-VL)
+                          # These models expect chat-style messages with structured prompts
+                          if hasattr(self.model, "task") and self.model.task == "image-text-to-text":
+                              # Build the text instruction (include system prompt if set)
+                              system_instruction = engine.system_prompt.strip() if engine.system_prompt else ""
+                              user_text = (
+                                  "Analyze the image and return a JSON object with keys: "
+                                  "'description' (detailed caption), 'category' (single broad category), "
+                                  "and 'keywords' (list of 5-10 tags). Return ONLY the raw JSON string."
+                              )
+                              if system_instruction:
+                                  messages = [
+                                      {"role": "system", "content": system_instruction},
+                                      {
+                                          "role": "user",
+                                          "content": [
+                                              {"type": "image", "image": img},
+                                              {"type": "text", "text": user_text}
+                                          ]
+                                      }
+                                  ]
+                              else:
+                                  messages = [
+                                      {
+                                          "role": "user",
+                                          "content": [
+                                              {"type": "image", "image": img},
+                                              {"type": "text", "text": user_text}
+                                          ]
+                                      }
+                                  ]
+                              try:
+                                  # For image-text-to-text pipelines, pass the formatted messages
+                                  # Note: The pipeline will handle the image extraction from the messages
+                                  result = self.model(text=messages, generate_kwargs={"max_new_tokens": 512})
                              except Exception as e:
                                  self.logger.error(f"VLM inference failed: {e}")
                                  raise

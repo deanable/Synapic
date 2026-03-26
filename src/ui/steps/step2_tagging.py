@@ -1808,7 +1808,14 @@ class Step2Tagging(ctk.CTkFrame):
                 
                 all_results = []
                 for t in tasks:
-                    models = list_models(filter=t, search=query, limit=5, sort="downloads", direction=-1)
+                    models = list_models(
+                        filter=t,
+                        library="transformers",
+                        search=query,
+                        limit=5,
+                        sort="downloads",
+                        direction=-1,
+                    )
                     for m in models:
                         all_results.append({
                             'id': m.id,
@@ -1824,8 +1831,11 @@ class Step2Tagging(ctk.CTkFrame):
                         unique_results.append(r)
                         seen.add(r['id'])
                 
-                # Filter out incompatible models (GPTQ, AWQ, etc.)
-                unique_results = [r for r in unique_results if huggingface_utils.is_model_compatible(r['id'])]
+                # Filter out models that our local transformers runtime cannot actually load.
+                unique_results = [
+                    r for r in unique_results
+                    if huggingface_utils.is_model_suitable_for_local_inference(r['id'], task=r['task'])
+                ]
                 
                 # Fetch sizes
                 results_with_details = []
@@ -2088,6 +2098,11 @@ class DownloadManagerDialog(ctk.CTkToplevel):
         super().__init__(parent)
         self.parent = parent
         self.session = session
+        self._search_results_cache = []
+        self._size_filter_min = 0
+        self._size_filter_max = 0
+        self._size_filter_active_max = 0
+        self.search_filter_var = ctk.StringVar(value="multimodal")
         self.title("Download Models from Hugging Face Hub")
         self.geometry("800x600")
         
@@ -2099,7 +2114,7 @@ class DownloadManagerDialog(ctk.CTkToplevel):
         self.grab_set()
         
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=1)
+        self.grid_rowconfigure(3, weight=1)
 
         # Search header
         header = ctk.CTkFrame(self)
@@ -2114,9 +2129,44 @@ class DownloadManagerDialog(ctk.CTkToplevel):
         
         ctk.CTkButton(header, text="Search Hub", command=self.start_search, width=120).pack(side="left", padx=5)
 
+        filter_row = ctk.CTkFrame(self)
+        filter_row.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 5))
+        ctk.CTkLabel(filter_row, text="Filter:").pack(side="left", padx=(8, 10), pady=8)
+        for value, label in [
+            ("keyword", "Keyword"),
+            ("category", "Category"),
+            ("description", "Description"),
+            ("multimodal", "Multimodal"),
+        ]:
+            ctk.CTkRadioButton(
+                filter_row,
+                text=label,
+                value=value,
+                variable=self.search_filter_var,
+            ).pack(side="left", padx=8, pady=8)
+
+        size_filter = ctk.CTkFrame(self)
+        size_filter.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 5))
+        size_filter.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(size_filter, text="Max size:").grid(row=0, column=0, padx=(8, 10), pady=8, sticky="w")
+        self.size_slider = ctk.CTkSlider(
+            size_filter,
+            from_=0,
+            to=1,
+            number_of_steps=100,
+            command=self._on_size_slider_change,
+        )
+        self.size_slider.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=8)
+        self.size_slider.set(1)
+        self.size_slider.configure(state="disabled")
+
+        self.size_label = ctk.CTkLabel(size_filter, text="No size data yet", width=220, anchor="e")
+        self.size_label.grid(row=0, column=2, padx=(0, 8), pady=8, sticky="e")
+
         # Results area
         self.results_frame = ctk.CTkScrollableFrame(self, label_text="Hugging Face Hub Results")
-        self.results_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=5)
+        self.results_frame.grid(row=3, column=0, sticky="nsew", padx=10, pady=5)
         
         # Add a header label
         header_text = f"{'Model ID':<40} | {'Capability':^15} | {'Size':>10}"
@@ -2131,7 +2181,7 @@ class DownloadManagerDialog(ctk.CTkToplevel):
         
         # Status footer
         self.footer = ctk.CTkFrame(self)
-        self.footer.grid(row=2, column=0, sticky="ew", padx=10, pady=10)
+        self.footer.grid(row=4, column=0, sticky="ew", padx=10, pady=10)
         
         self.lbl_status = ctk.CTkLabel(self.footer, text="Enter a query and click Search", text_color="gray")
         self.lbl_status.pack(side="left", padx=5)
@@ -2142,32 +2192,40 @@ class DownloadManagerDialog(ctk.CTkToplevel):
 
     def start_search(self):
         query = self.search_entry.get()
-        task = self.task_var.get()
-        self.lbl_status.configure(text=f"Searching Hub for '{task}'...")
+        search_filter = self.search_filter_var.get()
+        self.lbl_status.configure(text=f"Searching Hub for {search_filter} models...")
+        self._search_results_cache = []
+        self._reset_size_filter()
         
         for widget in self.results_frame.winfo_children():
             widget.destroy()
         
         # Use submit_replacing so rapid searches only execute the final one
-        self._worker.submit_replacing("search", self._search_worker, query, task)
+        self._worker.submit_replacing("search", self._search_worker, query, search_filter)
 
-    def _search_worker(self, query, task):
+    def _search_worker(self, query, search_filter):
         try:
             from huggingface_hub import list_models
             from src.core import huggingface_utils, config
-            
-            # search across all relevant image tasks to be helpful
-            tasks = [
-                config.MODEL_TASK_IMAGE_CLASSIFICATION,
-                config.MODEL_TASK_IMAGE_TO_TEXT,
-                config.MODEL_TASK_ZERO_SHOT,
-                "visual-question-answering",
-                "image-text-to-text"
-            ]
+
+            filter_tasks = {
+                "keyword": [config.MODEL_TASK_IMAGE_CLASSIFICATION],
+                "category": [config.MODEL_TASK_ZERO_SHOT],
+                "description": [config.MODEL_TASK_IMAGE_TO_TEXT],
+                "multimodal": ["image-text-to-text", "visual-question-answering", config.MODEL_TASK_IMAGE_TO_TEXT],
+            }
+            tasks = filter_tasks.get(search_filter, filter_tasks["multimodal"])
             
             all_results = []
             for t in tasks:
-                models = list_models(filter=t, search=query, limit=10, sort="downloads", direction=-1)
+                models = list_models(
+                    filter=t,
+                    library="transformers",
+                    search=query,
+                    limit=10,
+                    sort="downloads",
+                    direction=-1,
+                )
                 for m in models:
                     all_results.append({
                         'id': m.id,
@@ -2183,10 +2241,10 @@ class DownloadManagerDialog(ctk.CTkToplevel):
                     unique_results.append(r)
                     seen.add(r['id'])
             
-            # Filter out incompatible models (GPTQ, AWQ, etc.)
+            # Filter out models our local runtime can't use.
             compatible_results = []
             for r in unique_results:
-                if huggingface_utils.is_model_compatible(r['id']):
+                if huggingface_utils.is_model_suitable_for_local_inference(r['id'], task=r['task']):
                     compatible_results.append(r)
                 else:
                     print(f"Filtered out incompatible model: {r['id']}")
@@ -2200,8 +2258,10 @@ class DownloadManagerDialog(ctk.CTkToplevel):
                 mid = item['id']
                 try:
                     size_bytes = huggingface_utils.get_remote_model_size(mid)
+                    item['size_bytes'] = size_bytes
                     item['size_str'] = huggingface_utils.format_size(size_bytes)
                 except Exception:
+                    item['size_bytes'] = 0
                     item['size_str'] = "Unknown"
                 return item
 
@@ -2213,8 +2273,15 @@ class DownloadManagerDialog(ctk.CTkToplevel):
             error_msg = str(e)
             self.after(0, lambda: self.lbl_status.configure(text=f"Error: {error_msg}", text_color="red") if self.winfo_exists() else None)
 
-    def show_search_results(self, results):
-        self.lbl_status.configure(text=f"Found {len(results)} models.", text_color="gray")
+    def show_search_results(self, results, refresh_size_filter=True):
+        self._search_results_cache = list(results or [])
+        if refresh_size_filter:
+            self._configure_size_filter(self._search_results_cache)
+        filtered_results = self._get_size_filtered_results()
+        self.lbl_status.configure(
+            text=f"Found {len(filtered_results)} of {len(self._search_results_cache)} models.",
+            text_color="gray"
+        )
         for widget in self.results_frame.winfo_children():
             widget.destroy()
 
@@ -2222,12 +2289,68 @@ class DownloadManagerDialog(ctk.CTkToplevel):
         header_text = f"{'Model ID':<40} | {'Capability':^15} | {'Size':>10}"
         ctk.CTkLabel(self.results_frame, text=header_text, font=("Courier New", 12, "bold"), text_color="gray", anchor="w").pack(fill="x", pady=(5, 10), padx=5)
 
-        if not results:
+        if not self._search_results_cache:
              ctk.CTkLabel(self.results_frame, text="No models found matching your query.", text_color="gray").pack(pady=20)
              return
+        if not filtered_results:
+             ctk.CTkLabel(self.results_frame, text="No models match the current size filter.", text_color="gray").pack(pady=20)
+             return
              
-        for item in results:
+        for item in filtered_results:
             self.add_result_item(item['id'], item['size_str'], item['capability'])
+
+    def _reset_size_filter(self):
+        self._size_filter_min = 0
+        self._size_filter_max = 0
+        self._size_filter_active_max = 0
+        self.size_slider.configure(from_=0, to=1, state="disabled")
+        self.size_slider.set(1)
+        self.size_label.configure(text="No size data yet")
+
+    def _configure_size_filter(self, results):
+        if not results:
+            self._reset_size_filter()
+            return
+
+        sizes = [max(int(item.get("size_bytes", 0) or 0), 0) for item in results]
+        self._size_filter_min = min(sizes)
+        self._size_filter_max = max(sizes)
+        self._size_filter_active_max = self._size_filter_max
+
+        if self._size_filter_min == self._size_filter_max:
+            self.size_slider.configure(from_=self._size_filter_min, to=self._size_filter_max + 1, state="disabled")
+            self.size_slider.set(self._size_filter_max + 1)
+        else:
+            self.size_slider.configure(from_=self._size_filter_min, to=self._size_filter_max, state="normal")
+            self.size_slider.set(self._size_filter_max)
+
+        self._update_size_label()
+
+    def _get_size_filtered_results(self):
+        return [
+            item for item in self._search_results_cache
+            if max(int(item.get("size_bytes", 0) or 0), 0) <= self._size_filter_active_max
+        ]
+
+    def _update_size_label(self):
+        from src.core import huggingface_utils
+
+        if not self._search_results_cache:
+            self.size_label.configure(text="No size data yet")
+            return
+
+        current = huggingface_utils.format_size(self._size_filter_active_max)
+        minimum = huggingface_utils.format_size(self._size_filter_min)
+        maximum = huggingface_utils.format_size(self._size_filter_max)
+        self.size_label.configure(text=f"{minimum} to {current} of {maximum}")
+
+    def _on_size_slider_change(self, value):
+        if not self._search_results_cache:
+            return
+
+        self._size_filter_active_max = int(round(value))
+        self._update_size_label()
+        self.show_search_results(self._search_results_cache, refresh_size_filter=False)
 
     def add_result_item(self, model_id, size_str, capability):
         frame = ctk.CTkFrame(self.results_frame)
@@ -2263,36 +2386,28 @@ class DownloadManagerDialog(ctk.CTkToplevel):
         self.parent.focus_set()
 
     def start_download(self, model_id):
-        from src.core import huggingface_utils
-        
-        # Check compatibility before downloading
-        if not huggingface_utils.is_model_compatible(model_id):
-            reason = huggingface_utils.get_incompatibility_reason(model_id)
-            self.lbl_status.configure(
-                text=f"Cannot download {model_id}: {reason}", 
-                text_color="red"
-            )
-            import tkinter.messagebox as mb
-            mb.showerror(
-                "Incompatible Model", 
-                f"The model '{model_id}' cannot be used with Synapic.\n\n"
-                f"Reason: {reason}\n\n"
-                "These models require special libraries not included in Synapic.\n"
-                "Please choose a different model."
-            )
-            return
-        
-        self.lbl_status.configure(text=f"Downloading {model_id}...", text_color="gray")
+        self.lbl_status.configure(text=f"Preparing download for {model_id}...", text_color="gray")
         self.progress.set(0)
         
         self.download_queue = queue.Queue()
         self._worker.submit(
-            huggingface_utils.download_model_worker, 
+            self._prepare_and_download_model,
             model_id, 
             self.download_queue
         )
         
         self.poll_download_queue()
+
+    def _prepare_and_download_model(self, model_id, download_queue):
+        from src.core import huggingface_utils
+
+        download_queue.put(("status_update", f"Checking compatibility for {model_id}..."))
+        reason = huggingface_utils.get_local_inference_incompatibility_reason(model_id)
+        if reason is not None:
+            download_queue.put(("incompatible_model", (model_id, reason)))
+            return
+
+        huggingface_utils.download_model_worker(model_id, download_queue)
 
     def poll_download_queue(self):
         try:
@@ -2313,6 +2428,19 @@ class DownloadManagerDialog(ctk.CTkToplevel):
                     self.on_download_complete(data)
                     return # Stop polling
                 
+                elif msg_type == "incompatible_model":
+                    model_id, reason = data
+                    self.lbl_status.configure(text=f"Cannot download {model_id}: {reason}", text_color="red")
+                    import tkinter.messagebox as mb
+                    mb.showerror(
+                        "Incompatible Model",
+                        f"The model '{model_id}' cannot be used with Synapic.\n\n"
+                        f"Reason: {reason}\n\n"
+                        "This model is not suitable for Synapic's local inference runtime.\n"
+                        "Please choose a different model."
+                    )
+                    return
+
                 elif msg_type == "error":
                     self.lbl_status.configure(text=f"Download failed: {data}", text_color="red")
                     return # Stop polling
