@@ -797,6 +797,7 @@ class ProcessingManager:
 
                 # Download image (server-side resized for faster AI inference)
                 # Use original at 100%, proportionally scaled preview at lower scales
+                ds = self.controller.session.datasource
                 scale = getattr(ds, "resize_scale", 100)
                 if scale >= 100:
                     path = daminion_client.download_original(item_id)
