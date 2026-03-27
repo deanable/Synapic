@@ -339,6 +339,7 @@ class ProcessingManager:
             # For Daminion sources: ask the server how many records match the
             # current filters so we can confirm every page is retrieved.
             ds = self.session.datasource
+            expected_total = 0  # Default for non-Daminion sources
             if ds.type == "daminion" and self.session.daminion_client:
                 try:
                     untagged_fields = []
@@ -430,7 +431,12 @@ class ProcessingManager:
                     self._start_time = time.monotonic()
                 elapsed = time.monotonic() - self._start_time
                 processed = self.session.processed_items
-                remaining = max(self.session.total_items - processed, 0)
+                # Use expected_total for ETA when auto-pagination is enabled
+                if self.auto_paginate and expected_total > 0:
+                    effective_total = expected_total
+                else:
+                    effective_total = self.session.total_items
+                remaining = max(effective_total - processed, 0)
                 etc = (elapsed / processed * remaining) if processed > 0 else 0
                 self.progress(
                     self.session.processed_items / max(self.session.total_items, 1),
@@ -490,7 +496,11 @@ class ProcessingManager:
                         time.monotonic() - self._start_time if self._start_time else 0
                     )
                     processed = self.session.processed_items
-                    remaining = max(self.session.total_items - processed, 0)
+                    if self.auto_paginate and expected_total > 0:
+                        effective_total = expected_total
+                    else:
+                        effective_total = self.session.total_items
+                    remaining = max(effective_total - processed, 0)
                     etc = (elapsed / processed * remaining) if processed > 0 else 0
                     self.progress(
                         pct,
