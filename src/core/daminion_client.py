@@ -204,11 +204,29 @@ class DaminionClient:
             return None
 
     def download_preview(
-        self, item_id: int, width: int = 1000, height: int = 1000
+        self, item_id: int, width: int = 1000, height: Optional[int] = None
     ) -> Optional[Path]:
-        """Download a server-side scaled preview image to a temporary file."""
+        """
+        Download a server-side scaled preview image to a temporary file.
+        If only width is provided, height is auto-calculated to maintain aspect ratio
+        using the original image dimensions fetched from Daminion metadata.
+        """
+        target_w = width
+        target_h = height
+
+        # If only width is given, fetch original dimensions to preserve aspect ratio
+        if target_h is None:
+            dims = self.get_item_dimensions(item_id)
+            if dims:
+                orig_w, orig_h = dims
+                if orig_w > 0:
+                    target_h = int(orig_h * target_w / orig_w)
+            else:
+                # Fallback: square
+                target_h = target_w
+
         try:
-            preview_bytes = self.get_preview(item_id, width, height)
+            preview_bytes = self.get_preview(item_id, target_w, target_h)
             if not preview_bytes:
                 return None
             temp_file = self.temp_dir / f"{item_id}_preview.jpg"
@@ -239,6 +257,28 @@ class DaminionClient:
             return self._api.media_items.get_absolute_path(item_id)
         except Exception as e:
             logger.error(f"Failed to get file path for item {item_id}: {e}")
+            return None
+
+    def get_item_dimensions(self, item_id: int) -> Optional[Tuple[int, int]]:
+        """
+        Fetch the original image dimensions (width, height) from Daminion metadata.
+        Returns None if dimensions cannot be determined.
+        """
+        try:
+            items = self._api.media_items.get_by_ids([item_id])
+            if not items:
+                return None
+            item = items[0] if isinstance(items, list) else items
+            # Try common dimension field names
+            for w_key in ("Width", "PixelWidth", "OriginalWidth", "ImageWidth"):
+                for h_key in ("Height", "PixelHeight", "OriginalHeight", "ImageHeight"):
+                    w = item.get(w_key)
+                    h = item.get(h_key)
+                    if w and h:
+                        return int(w), int(h)
+            return None
+        except Exception as e:
+            logger.debug(f"Could not get dimensions for item {item_id}: {e}")
             return None
 
     def _get_tag_id(self, tag_name: str) -> Optional[int]:
