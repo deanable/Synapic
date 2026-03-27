@@ -795,19 +795,27 @@ class ProcessingManager:
                 self.logger.debug(f"Processing Daminion item {item_id}: {filename}")
                 self.log(f"Processing Daminion Item: {filename}...")
 
-                # Download thumbnail (server-side resized for faster AI inference)
-                scale = ds.resize_scale if hasattr(ds, "resize_scale") else 100
-                thumb_size = max(
-                    75, int(300 * scale / 100)
-                )  # min 75px, scaled from 300
-                temp_thumb = daminion_client.download_thumbnail(
-                    item_id, width=thumb_size, height=thumb_size
-                )
-                if not temp_thumb or not temp_thumb.exists():
-                    raise RuntimeError(
-                        f"Could not download thumbnail for item {item_id}"
+                # Download image (server-side resized for faster AI inference)
+                # Use original file at 100%, progressively smaller preview at lower scales
+                scale = getattr(ds, "resize_scale", 100)
+                if scale >= 100:
+                    # Full original file for best quality
+                    path = daminion_client.download_original(item_id)
+                    if not path or not path.exists():
+                        raise RuntimeError(
+                            f"Could not download original for item {item_id}"
+                        )
+                else:
+                    # Server-side scaled preview at the chosen quality level
+                    base = 2000  # base preview size in pixels
+                    preview_size = max(75, int(base * scale / 100))
+                    path = daminion_client.download_preview(
+                        item_id, width=preview_size, height=preview_size
                     )
-                path = temp_thumb
+                    if not path or not path.exists():
+                        raise RuntimeError(
+                            f"Could not download preview for item {item_id}"
+                        )
             else:
                 path = item
                 self.logger.debug(f"Processing local file: {path}")
