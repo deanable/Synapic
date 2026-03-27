@@ -164,6 +164,7 @@ class ProcessingManager:
         self.log = log_callback  # UI log callback
         self.progress = progress_callback  # UI progress callback
         self.stop_event = threading.Event()  # Signal for aborting
+        self._start_time = None  # Job start time for ETA calculation
         self.thread = None  # Background processing thread
         self.logger = logging.getLogger(__name__)  # File logger
         self.auto_paginate = (
@@ -195,6 +196,7 @@ class ProcessingManager:
 
         # Clear any previous abort signal
         self.stop_event.clear()
+        self._start_time = None  # Will be set on first progress update
 
         # Create and start background thread
         # daemon=True ensures thread terminates when main program exits
@@ -423,11 +425,20 @@ class ProcessingManager:
 
                 # Reset per-page counter; overall progress uses session counters
                 # more_pages=True: this is a page boundary, job is not done yet
+                # Record start time on first progress call for ETA calculation
+                if self._start_time is None:
+                    self._start_time = time.monotonic()
+                elapsed = time.monotonic() - self._start_time
+                processed = self.session.processed_items
+                remaining = max(self.session.total_items - processed, 0)
+                etc = (elapsed / processed * remaining) if processed > 0 else 0
                 self.progress(
                     self.session.processed_items / max(self.session.total_items, 1),
                     self.session.processed_items,
                     self.session.total_items,
                     more_pages=True,
+                    elapsed_seconds=elapsed,
+                    etc_seconds=etc,
                 )
 
                 # ============================================================
@@ -475,11 +486,19 @@ class ProcessingManager:
                     )
                     _last_item_on_page = i == page_count - 1
                     _job_truly_done = _is_last_page and _last_item_on_page
+                    elapsed = (
+                        time.monotonic() - self._start_time if self._start_time else 0
+                    )
+                    processed = self.session.processed_items
+                    remaining = max(self.session.total_items - processed, 0)
+                    etc = (elapsed / processed * remaining) if processed > 0 else 0
                     self.progress(
                         pct,
                         self.session.processed_items,
                         self.session.total_items,
                         more_pages=not _job_truly_done,
+                        elapsed_seconds=elapsed,
+                        etc_seconds=etc,
                     )
 
                 # Stop pagination if abort was requested
