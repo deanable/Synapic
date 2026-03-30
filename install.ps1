@@ -49,36 +49,38 @@ if (-not $pythonCmd) {
     Write-Log "Python found: $($pythonCmd.Path)"
 }
 
-# Step 2: Get source code
+# Step 2: Ensure Git is installed
+$gitCmd = Get-Command git -ErrorAction SilentlyContinue
+if (-not $gitCmd) {
+    Write-Log "Git not found. Installing Git silently..."
+    $gitInstaller = "$env:TEMP\git_installer.exe"
+    $gitUrl = "https://github.com/git-for-windows/git/releases/download/v2.44.0.windows.1/MinGit-2.44.0-64-bit.exe"
+    try {
+        Invoke-WebRequest -Uri $gitUrl -OutFile $gitInstaller -UseBasicParsing -ErrorAction Stop
+        $args = @("/silent", "/norestart", "/NOCENTRALCERT", "ADD_PATH=1")
+        $proc = Start-Process -FilePath $gitInstaller -ArgumentList $args -Wait -NoNewWindow -PassThru
+        # Refresh PATH for current session
+        $env:PATH += ";C:\Program Files\Git\cmd;C:\Program Files\Git\bin"
+        Start-Sleep -Seconds 2
+    } catch {
+        Write-Log "Failed to download Git installer: $_.Exception.Message"
+        exit 1
+    }
+} else {
+    Write-Log "Git found: $($gitCmd.Path)"
+}
+
+# Step 3: Get source code
 if (Test-Path '.git') {
     Write-Log "Updating existing Synapic repo..."
     git fetch --all 2>$null
     git reset --hard origin/main 2>$null
 } else {
     Write-Log "Cloning Synapic repository from GitHub..."
-    if (Get-Command git -ErrorAction SilentlyContinue) {
-        git clone https://github.com/Dean-Kruger/Synapic.git .
-    } else {
-        Write-Log "Git not found. Falling back to downloading repository zip..."
-        $zipUrl = "https://github.com/Dean-Kruger/Synapic/archive/refs/heads/main.zip"
-        $zipPath = "$env:TEMP\Synapic-main.zip"
-        try {
-            Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
-            Expand-Archive -Path $zipPath -DestinationPath $Root -Force
-            # Move contents up if extracted into a subfolder
-            $extractedRoot = Get-ChildItem -Directory -Path $Root | Where-Object { $_.Name -like "Synapic-*" } | Select-Object -First 1
-            if ($extractedRoot) {
-                Move-Item -Path "$($Root)\$($extractedRoot.Name)\*" -Destination "$(Resolve-Path $Root)" -Force
-                Remove-Item -Recurse -Force "$($Root)\$($extractedRoot.Name)" -ErrorAction SilentlyContinue
-            }
-        } catch {
-            Write-Log "Failed to download or extract repository zip: $_.Exception.Message"
-            exit 1
-        }
-    }
+    git clone https://github.com/Dean-Kruger/Synapic.git .
 }
 
-# Step 3: Setup virtual environment
+# Step 4: Setup virtual environment
 if (-not (Test-Path '.venv')) {
     Write-Log "Creating Python virtual environment (.venv)"
     $venvPython = "C:\\Python311\\python.exe"
@@ -113,7 +115,7 @@ if (-not (Get-Command pytest -ErrorAction SilentlyContinue)) {
     & $PipExe install pytest 2>$null
 }
 
-# Step 4: Run unit tests
+# Step 5: Run unit tests
 if (Test-Path 'tests\\unit') {
     Write-Log "Running unit tests..."
     & ".\\.venv\\Scripts\\pytest.exe" tests\\unit -q
