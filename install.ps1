@@ -56,7 +56,26 @@ if (Test-Path '.git') {
     git reset --hard origin/main 2>$null
 } else {
     Write-Log "Cloning Synapic repository from GitHub..."
-    git clone https://github.com/Dean-Kruger/Synapic.git .
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        git clone https://github.com/Dean-Kruger/Synapic.git .
+    } else {
+        Write-Log "Git not found. Falling back to downloading repository zip..."
+        $zipUrl = "https://github.com/Dean-Kruger/Synapic/archive/refs/heads/main.zip"
+        $zipPath = "$env:TEMP\Synapic-main.zip"
+        try {
+            Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
+            Expand-Archive -Path $zipPath -DestinationPath $Root -Force
+            # Move contents up if extracted into a subfolder
+            $extractedRoot = Get-ChildItem -Directory -Path $Root | Where-Object { $_.Name -like "Synapic-*" } | Select-Object -First 1
+            if ($extractedRoot) {
+                Move-Item -Path "$($Root)\$($extractedRoot.Name)\*" -Destination "$(Resolve-Path $Root)" -Force
+                Remove-Item -Recurse -Force "$($Root)\$($extractedRoot.Name)" -ErrorAction SilentlyContinue
+            }
+        } catch {
+            Write-Log "Failed to download or extract repository zip: $_.Exception.Message"
+            exit 1
+        }
+    }
 }
 
 # Step 3: Setup virtual environment
