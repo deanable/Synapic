@@ -101,6 +101,12 @@ if exist requirements.txt (
   .venv\\Scripts\\pip.exe install -r requirements.txt >nul 2>&1
   if %ERRORLEVEL% NEQ 0 (
     if %SILENT%==0 (
+      echo [install] Failed to install dependencies from requirements.txt. Attempting to install pytest directly...
+    )
+  )
+  .venv\\Scripts\\pip.exe install pytest >nul 2>&1
+  if %ERRORLEVEL% NEQ 0 (
+    if %SILENT%==0 (
       echo [install] Dependency installation failed.
     )
     exit /b 1
