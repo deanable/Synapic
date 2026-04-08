@@ -111,6 +111,13 @@ def parse_args():
         dest="no_gui",
         help="Run in headless mode without launching GUI",
     )
+    parser.add_argument(
+        "--gui",
+        "-g",
+        action="store_true",
+        dest="force_gui",
+        help="Force GUI launch (override headless)",
+    )
     return parser.parse_args()
 
 
@@ -147,6 +154,8 @@ def main():
 
             shutdown_logging()
             sys.exit(0)
+        if getattr(args, "force_gui", False):
+            logger.info("Force GUI launch requested by --gui flag")
 
         # Create and display the main application window
         # The App class (from src.ui.app) handles all UI initialization
