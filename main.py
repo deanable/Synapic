@@ -14,6 +14,7 @@ License: Proprietary
 """
 
 import sys
+import argparse
 import os
 import logging
 
@@ -26,9 +27,9 @@ import logging
 # memory leak fixes to be silently skipped.
 # Replace None streams with devnull wrappers so all downstream code works.
 if sys.stdout is None:
-    sys.stdout = open(os.devnull, 'w')
+    sys.stdout = open(os.devnull, "w")
 if sys.stderr is None:
-    sys.stderr = open(os.devnull, 'w')
+    sys.stderr = open(os.devnull, "w")
 
 # ============================================================================
 # WINDOWS COMPATIBILITY - HUGGING FACE CACHE SYMLINKS
@@ -45,7 +46,7 @@ os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 # This allows us to import modules using 'from src.core import ...' syntax
 # regardless of where the script is executed from.
 current_dir = os.path.dirname(os.path.abspath(__file__))
-src_dir = os.path.join(current_dir, 'src')
+src_dir = os.path.join(current_dir, "src")
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
@@ -56,6 +57,7 @@ if src_dir not in sys.path:
 # This ensures all subsequent imports and operations are properly logged.
 # The logger writes to both console and a rotating file in the 'logs' directory.
 from src.utils.logger import setup_logging
+
 log_file = setup_logging()
 
 # Import the main application UI after logging is configured
@@ -64,8 +66,9 @@ import tkinter
 
 # MONKEYPATCH: CTkToplevel icon methods
 # The customtkiner library tries to load a default icon in a delayed callback.
-# On some systems/configurations (especially Python 3.14 preview), this fails with 
+# On some systems/configurations (especially Python 3.14 preview), this fails with
 # a TclError even if the file exists. We patch these methods to catch and ignore those errors.
+
 
 def safe_wm_iconbitmap(self, bitmap=None, default=None):
     try:
@@ -76,6 +79,7 @@ def safe_wm_iconbitmap(self, bitmap=None, default=None):
     except Exception as e:
         logging.getLogger(__name__).warning(f"Ignored error in wm_iconbitmap: {e}")
 
+
 def safe_iconbitmap(self, bitmap=None, default=None):
     try:
         self._iconbitmap_method_called = True
@@ -83,11 +87,13 @@ def safe_iconbitmap(self, bitmap=None, default=None):
     except Exception as e:
         logging.getLogger(__name__).warning(f"Ignored error in iconbitmap: {e}")
 
+
 def safe_wm_iconphoto(self, default=False, *args):
     try:
         tkinter.Toplevel.wm_iconphoto(self, default, *args)
     except Exception as e:
         logging.getLogger(__name__).warning(f"Ignored error in wm_iconphoto: {e}")
+
 
 customtkinter.CTkToplevel.wm_iconbitmap = safe_wm_iconbitmap
 customtkinter.CTkToplevel.iconbitmap = safe_iconbitmap
@@ -95,7 +101,21 @@ customtkinter.CTkToplevel.wm_iconphoto = safe_wm_iconphoto
 
 from src.ui.app import App
 
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Synapic launcher (GUI or headless)")
+    parser.add_argument(
+        "--no-gui",
+        "-n",
+        action="store_true",
+        dest="no_gui",
+        help="Run in headless mode without launching GUI",
+    )
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
     """
     Main application entry point.
     
@@ -113,21 +133,29 @@ def main():
     - Step 4: View and export results
     """
     logger = logging.getLogger(__name__)
-    
+
     try:
         # Log application startup information
         logger.info("Initializing Synapic application")
         logger.info(f"Python version: {sys.version}")
         logger.info(f"Working directory: {current_dir}")
-        
+
+        if args.no_gui:
+            logger.info("No-GUI mode requested. Exiting after initialization steps.")
+            logger.info("Application shutdown (headless)")
+            from src.utils.logger import shutdown_logging
+
+            shutdown_logging()
+            sys.exit(0)
+
         # Create and display the main application window
         # The App class (from src.ui.app) handles all UI initialization
         app = App()
         logger.info("Application window created successfully")
-        
+
         # Start the GUI event loop (blocks until window is closed)
         app.mainloop()
-        
+
     except Exception as e:
         # Log any fatal errors with full stack trace
         logger.critical(f"Fatal error in main application: {e}", exc_info=True)
@@ -136,11 +164,13 @@ def main():
         # Always perform cleanup, even if an error occurred
         logger.info("Application shutdown")
         from src.utils.logger import shutdown_logging
+
         shutdown_logging()
-        
+
         # Explicitly exit to ensure all threads/processes are terminated
         # This is especially important for Windows where pythonw can sometimes hang
         sys.exit(0)
+
 
 # ============================================================================
 # APPLICATION ENTRY POINT
