@@ -1533,7 +1533,9 @@ class VersionControlAPI(BaseAPI):
         )
         return True
 
-    def checkin(self, item_id: int, file_path: str) -> Dict[str, Any]:
+    def checkin(
+        self, item_id: int, file_path: str, message: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Check in a new file version for a checked-out media item.
 
@@ -1560,14 +1562,29 @@ class VersionControlAPI(BaseAPI):
             }
             # Many DAMs take the ID in the body or query for checkin.
             data = {"id": str(item_id)}
+            if message:
+                # Not all server versions support check-in comments. We pass the
+                # field when provided and gracefully fall back if rejected.
+                data["comment"] = message
 
-            result = self.client._make_request(
-                "/api/VersionControl/CheckIn",
-                method="POST",
-                data=data,
-                files=files
-            )
-            return result
+            try:
+                result = self.client._make_request(
+                    "/api/VersionControl/CheckIn",
+                    method="POST",
+                    data=data,
+                    files=files
+                )
+                return result
+            except Exception:
+                if "comment" in data:
+                    fallback_data = {"id": str(item_id)}
+                    return self.client._make_request(
+                        "/api/VersionControl/CheckIn",
+                        method="POST",
+                        data=fallback_data,
+                        files=files
+                    )
+                raise
 
     def undo_checkout(self, item_ids: List[int]) -> bool:
         """

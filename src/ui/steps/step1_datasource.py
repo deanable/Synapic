@@ -433,6 +433,7 @@ class Step1Datasource(ctk.CTkFrame):
         if not self.controller.session.daminion_client:
             messagebox.showerror("Error", "Not connected to Daminion.")
             return
+        self._apply_current_process_limit_to_datasource()
 
         self.lbl_total_count.configure(text="Loading items for upscale...")
         self._worker.submit(self._fetch_items_and_navigate_to_upscale)
@@ -546,6 +547,7 @@ class Step1Datasource(ctk.CTkFrame):
         if not self.controller.session.daminion_client:
             messagebox.showerror("Error", "Not connected to Daminion.")
             return
+        self._apply_current_process_limit_to_datasource()
 
         # Show loading state
         self.lbl_total_count.configure(text="Loading items for dedup...")
@@ -597,7 +599,12 @@ class Step1Datasource(ctk.CTkFrame):
                     f"Fetching items with filters: scope={scope}, status={status}, untagged={untagged}"
                 )
 
-                # Fetch items (limit to 500 for dedup to avoid performance issues)
+                process_limit = self.controller.session.datasource.max_items
+                dedup_fetch_limit = 500
+                if process_limit and process_limit > 0:
+                    dedup_fetch_limit = min(process_limit, 500)
+
+                # Fetch items (capped at 500 for dedup UI performance)
                 items = self.controller.session.daminion_client.get_items_filtered(
                     scope=scope,
                     saved_search_id=ss_id,
@@ -605,7 +612,7 @@ class Step1Datasource(ctk.CTkFrame):
                     search_term=search_term if scope == "search" else None,
                     untagged_fields=untagged,
                     status_filter=status,
-                    max_items=500,
+                    max_items=dedup_fetch_limit,
                 )
 
                 self.logger.info(f"Fetched {len(items) if items else 0} items.")
@@ -977,6 +984,35 @@ class Step1Datasource(ctk.CTkFrame):
 
         self._update_count_label(total, count)
 
+    def _apply_current_process_limit_to_datasource(self):
+        """Persist the currently selected process limit into datasource.max_items."""
+        ds = self.controller.session.datasource
+        slider_visible = bool(
+            hasattr(self, "limit_toggle_frame") and self.limit_toggle_frame.winfo_manager()
+        )
+        total_count = getattr(self, "_current_total_count", 0)
+
+        if not slider_visible or total_count <= 0 or not hasattr(self, "limit_slider"):
+            ds.max_items = 0
+            self.logger.info(
+                "[LIMIT DEBUG] Quick action with hidden/unknown slider -> max_items=0 (unlimited)"
+            )
+            return
+
+        slider_value = float(self.limit_slider.get())
+        if slider_value >= 1.0:
+            ds.max_items = 0
+            self.logger.info(
+                "[LIMIT DEBUG] Quick action slider at 100% -> max_items=0 (unlimited)"
+            )
+            return
+
+        selected_count = self._get_selected_process_count(slider_value)
+        ds.max_items = max(1, int(selected_count))
+        self.logger.info(
+            f"[LIMIT DEBUG] Quick action slider at {slider_value * 100:.0f}% of {total_count} -> max_items={ds.max_items}"
+        )
+
     def _get_selected_process_count(self, slider_value):
         """Return how many records will actually be processed for the slider value."""
         total = getattr(self, "_current_total_count", 0)
@@ -1222,35 +1258,8 @@ class Step1Datasource(ctk.CTkFrame):
             ds.resize_scale = int(self.resize_scale_var.get())
             ds.use_thumbnail_override = self.use_thumbnail_override_var.get()
 
-            # Apply limit from slider if visible
-            slider_visible = bool(self.limit_toggle_frame.winfo_manager())
-            slider_value = self.limit_slider.get()
-            total_count = getattr(self, "_current_total_count", 0)
-
             self.logger.info(f"[LIMIT DEBUG] Scope: {ds.daminion_scope}, Tab: {tab}")
-            self.logger.info(
-                f"[LIMIT DEBUG] Slider visible: {slider_visible}, Slider value: {slider_value:.2f}, Total count: {total_count}"
-            )
-
-            if slider_visible:
-                if slider_value >= 1.0:
-                    ds.max_items = 0  # 0 means unlimited
-                    self.logger.info(
-                        "[LIMIT DEBUG] Slider at 100% -> max_items=0 (unlimited)"
-                    )
-                else:
-                    ds.max_items = int(total_count * slider_value)
-                    if ds.max_items == 0 and total_count > 0:
-                        ds.max_items = 1
-                    self.logger.info(
-                        f"[LIMIT DEBUG] Slider at {slider_value * 100:.0f}% of {total_count} -> max_items={ds.max_items}"
-                    )
-            else:
-                ds.max_items = 0
-                self.logger.info(
-                    "[LIMIT DEBUG] Slider hidden -> max_items=0 (unlimited)"
-                )
-
+            self._apply_current_process_limit_to_datasource()
             self.logger.info(f"[LIMIT DEBUG] Final ds.max_items = {ds.max_items}")
 
         self.controller.show_step("Step2Tagging")

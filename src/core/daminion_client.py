@@ -854,12 +854,14 @@ class DaminionClient:
             logger.error(f"Failed to check out item {item_id}: {e}")
             return False
 
-    def checkin_item(self, item_id: int, file_path: str) -> bool:
+    def checkin_item(
+        self, item_id: int, file_path: str, message: Optional[str] = None
+    ) -> bool:
         """
         Check in an item as a new version.
         """
         try:
-            self._api.version_control.checkin(item_id, file_path)
+            self._api.version_control.checkin(item_id, file_path, message=message)
             return True
         except Exception as e:
             logger.error(f"Failed to check in item {item_id}: {e}")

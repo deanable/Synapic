@@ -513,55 +513,8 @@ class StepDedup(ctk.CTkFrame):
         try:
             # Re-fetch the item list from Daminion to capture any changes
             # (e.g., items deleted/tagged in a previous round)
-            ds = self.session.datasource
-            client = self.session.daminion_client
-            
-            if client and ds.type == "daminion":
-                self.after(0, lambda: self.progress_label.configure(text="Re-fetching items from Daminion..."))
-                
-                # Determine scope from saved datasource config
-                scope = getattr(ds, 'daminion_scope', 'all') or 'all'
-                status = getattr(ds, 'status_filter', 'all') or 'all'
-                
-                # Only pass scope-relevant IDs (mirrors Step1 logic)
-                ss_id = None
-                col_id = None
-                search_term = None
-                
-                if scope == 'saved_search':
-                    ss_id = getattr(ds, 'daminion_saved_search_id', None)
-                elif scope == 'collection':
-                    col_id = getattr(ds, 'daminion_collection_id', None)
-                elif scope == 'search':
-                    search_term = getattr(ds, 'daminion_search_term', None)
-                
-                untagged = []
-                if getattr(ds, 'daminion_untagged_keywords', False):
-                    untagged.append("Keywords")
-                if getattr(ds, 'daminion_untagged_categories', False):
-                    untagged.append("Category")
-                if getattr(ds, 'daminion_untagged_description', False):
-                    untagged.append("Description")
-                
-                logger.info(f"[DEDUP REFRESH] Refreshing items: scope={scope}, ss_id={ss_id}, col_id={col_id}, status={status}")
-                
-                fresh_items = client.get_items_filtered(
-                    scope=scope,
-                    saved_search_id=ss_id,
-                    collection_id=col_id,
-                    search_term=search_term,
-                    untagged_fields=untagged,
-                    status_filter=status,
-                    max_items=500
-                )
-                
-                if fresh_items:
-                    old_count = len(self.session.dedup_items) if self.session.dedup_items else 0
-                    self.session.dedup_items = fresh_items
-                    new_count = len(fresh_items)
-                    logger.info(f"[DEDUP REFRESH] Refreshed: {old_count} -> {new_count} items")
-                else:
-                    logger.warning("[DEDUP REFRESH] Re-fetch returned no items, keeping existing set")
+            self.after(0, lambda: self.progress_label.configure(text="Re-fetching items from Daminion..."))
+            self._reload_base_query_items()
             
             # Now run the actual scan
             self._run_scan()
@@ -821,29 +774,20 @@ class StepDedup(ctk.CTkFrame):
             msg += f"• Skipped: {results['skipped']} items\n"
         
         messagebox.showinfo("Deduplication Complete", msg)
-        
-        # Post-action cleanup (remove deleted items from session/UI)
-        if results.get('deleted_ids'):
-            deleted_ids = set(str(pid) for pid in results['deleted_ids'])
-            if hasattr(self.session, 'dedup_items'):
-                original_count = len(self.session.dedup_items)
-                self.session.dedup_items = [
-                    item for item in self.session.dedup_items
-                    if str(item.get('Id') or item.get('id')) not in deleted_ids
-                ]
-                new_count = len(self.session.dedup_items)
-                
-                if new_count < original_count:
-                    # Clear UI and ask for rescan
-                    for frame in self.group_frames:
-                        frame.destroy()
-                    self.group_frames.clear()
-                    self.initial_label.configure(
-                        text=f"Items deleted. Remaining: {new_count}.\nPlease rescan."
-                    )
-                    self.initial_label.pack(pady=50)
-                    self.apply_btn.configure(state="disabled")
-                    self.stats_label.configure(text="Items updated. Please rescan.")
+
+        # Always reload the base query and rescan after successful apply so the
+        # user can continue deduping on fresh results in the same step.
+        self.progress_frame.grid(row=2, column=0, sticky="ew", padx=20, pady=5)
+        self.progress_bar.set(0)
+        self.progress_label.configure(text="Reloading base query from Daminion...")
+        self.abort_btn.configure(state="disabled")
+        self.scan_btn.configure(state="disabled")
+        self.action_dropdown.configure(state="disabled")
+        self.apply_btn.configure(state="disabled")
+        threading.Thread(
+            target=self._reload_and_rescan_after_apply,
+            daemon=True,
+        ).start()
 
     def _on_apply_error(self, error_message: str):
         """Called on main thread when the dedup action fails."""
@@ -853,6 +797,125 @@ class StepDedup(ctk.CTkFrame):
         self.abort_btn.configure(state="normal")
         self.apply_btn.configure(state="normal", text="Apply Deduplication")
         messagebox.showerror("Error", f"Failed to apply deduplication:\n\n{error_message}")
+
+    def _reload_and_rescan_after_apply(self):
+        """Reload base query and immediately rescan to keep execution step fresh."""
+        try:
+            fresh_items = self._reload_base_query_items()
+            count = len(fresh_items) if fresh_items else 0
+
+            if count <= 0:
+                def _finish_empty():
+                    self.progress_frame.grid_remove()
+                    self.abort_btn.configure(state="normal")
+                    self.scan_btn.configure(state="normal")
+                    self.action_dropdown.configure(state="normal")
+                    self.apply_btn.configure(state="disabled")
+                    for frame in self.group_frames:
+                        frame.destroy()
+                    self.group_frames.clear()
+                    self.scan_result = None
+                    self.initial_label.configure(
+                        text=(
+                            "Base query reloaded, but no items remain.\n\n"
+                            "Adjust Step 1 filters or limits and scan again."
+                        )
+                    )
+                    self.initial_label.pack(pady=50)
+                    self.stats_label.configure(text="Base query reloaded: 0 items.")
+
+                self.after(0, _finish_empty)
+                return
+
+            def _prepare_rescan():
+                self.progress_label.configure(
+                    text=f"Base query reloaded ({count} items). Rescanning duplicates..."
+                )
+                self.progress_bar.set(0)
+                self.progress_frame.grid_remove()
+                self.abort_btn.configure(state="normal")
+                for frame in self.group_frames:
+                    frame.destroy()
+                self.group_frames.clear()
+                self.scan_result = None
+                self.initial_label.pack_forget()
+                self.progress_frame.grid(row=2, column=0, sticky="ew", padx=20, pady=5)
+                self.progress_label.configure(
+                    text=f"Scanning refreshed result set ({count} items)..."
+                )
+
+            self.after(0, _prepare_rescan)
+
+            # Recreate processor to ensure threshold is honored for follow-up scan.
+            self.processor = DaminionDedupProcessor(
+                self.session.daminion_client,
+                similarity_threshold=self.threshold_var.get()
+            )
+            self._run_scan()
+        except Exception as e:
+            logger.error(f"[DEDUP REFRESH] Post-apply reload/rescan failed: {e}", exc_info=True)
+            self.after(0, lambda: self.progress_frame.grid_remove())
+            self.after(0, lambda: self.abort_btn.configure(state="normal"))
+            self.after(0, lambda: self.scan_btn.configure(state="normal"))
+            self.after(0, lambda: self.action_dropdown.configure(state="normal"))
+            self.after(0, lambda: self.apply_btn.configure(state="normal", text="Apply Deduplication"))
+
+    def _reload_base_query_items(self) -> List[Dict]:
+        """Reload current Step 1 base query into session.dedup_items."""
+        ds = self.session.datasource
+        client = self.session.daminion_client
+
+        if not client or ds.type != "daminion":
+            return list(getattr(self.session, "dedup_items", []) or [])
+
+        scope = getattr(ds, "daminion_scope", "all") or "all"
+        status = getattr(ds, "status_filter", "all") or "all"
+        ss_id = None
+        col_id = None
+        search_term = None
+
+        if scope == "saved_search":
+            ss_id = getattr(ds, "daminion_saved_search_id", None)
+        elif scope == "collection":
+            col_id = getattr(ds, "daminion_collection_id", None)
+        elif scope == "search":
+            search_term = getattr(ds, "daminion_search_term", None)
+
+        untagged = []
+        if getattr(ds, "daminion_untagged_keywords", False):
+            untagged.append("Keywords")
+        if getattr(ds, "daminion_untagged_categories", False):
+            untagged.append("Category")
+        if getattr(ds, "daminion_untagged_description", False):
+            untagged.append("Description")
+
+        process_limit = getattr(ds, "max_items", 0) or 0
+        fetch_limit = 500
+        if process_limit > 0:
+            fetch_limit = min(process_limit, 500)
+
+        logger.info(
+            f"[DEDUP REFRESH] Reloading base query: scope={scope}, ss_id={ss_id}, "
+            f"col_id={col_id}, status={status}, limit={fetch_limit}"
+        )
+        fresh_items = client.get_items_filtered(
+            scope=scope,
+            saved_search_id=ss_id,
+            collection_id=col_id,
+            search_term=search_term,
+            untagged_fields=untagged,
+            status_filter=status,
+            max_items=fetch_limit,
+        )
+
+        if fresh_items:
+            old_count = len(self.session.dedup_items) if getattr(self.session, "dedup_items", None) else 0
+            self.session.dedup_items = fresh_items
+            logger.info(f"[DEDUP REFRESH] Refreshed base query: {old_count} -> {len(fresh_items)} items")
+            return fresh_items
+
+        logger.warning("[DEDUP REFRESH] Reload returned no items, keeping existing set")
+        return list(getattr(self.session, "dedup_items", []) or [])
     
     def set_items(self, items: List[Dict]):
         """Set the items to scan for deduplication."""

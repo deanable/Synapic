@@ -1,6 +1,8 @@
 import logging
 import threading
 import time
+import traceback
+from pathlib import Path
 from tkinter import messagebox
 
 import customtkinter as ctk
@@ -42,6 +44,8 @@ class StepUpscale(ctk.CTkFrame):
         # Main Content Area
         content_frame = ctk.CTkFrame(self)
         content_frame.grid(row=1, column=0, sticky="nsew", padx=20, pady=10)
+        content_frame.grid_rowconfigure(10, weight=1)
+        content_frame.grid_columnconfigure(0, weight=1)
 
         # Status Label
         self.lbl_status = ctk.CTkLabel(
@@ -189,6 +193,14 @@ class StepUpscale(ctk.CTkFrame):
         )
         self.btn_stop.pack(side="left", padx=10)
 
+        ctk.CTkLabel(content_frame, text="Execution Log:", anchor="w").pack(
+            fill="x", padx=20, pady=(10, 0)
+        )
+        self.console = ctk.CTkTextbox(content_frame, font=("Consolas", 12), height=180)
+        self.console.pack(fill="both", expand=True, padx=20, pady=(5, 20))
+        self.console.insert("0.0", "--- Upscale log initialized ---\n")
+        self.console.configure(state="disabled")
+
         # Navigation
         nav_frame = ctk.CTkFrame(self, fg_color="transparent")
         nav_frame.grid(row=2, column=0, sticky="ew", padx=20, pady=20)
@@ -229,10 +241,19 @@ class StepUpscale(ctk.CTkFrame):
         self.lbl_counter.configure(text="0 / 0 images")
         self.lbl_eta.configure(text="ETA: --")
         self._update_task("Preparing batch...")
+        self._clear_log()
+        self._log_event("Upscale run started.")
 
         factor_str = self.factor_var.get()
         factor = int(factor_str.replace("x", ""))
         options = self._build_upscale_options()
+        self._log_event(
+            "Parameters: "
+            f"workflow={options.workflow}, factor={factor}x, precision={options.precision}, "
+            f"output={options.output_format}, quality={options.jpeg_quality}, "
+            f"denoise={options.denoise_strength:.2f}, sharpen={options.sharpen_amount:.2f}, "
+            f"overwrite={options.overwrite_existing}"
+        )
         self._update_status(f"Starting batch upscaling at {factor}x...")
 
         # Run in worker to avoid blocking UI.
@@ -246,6 +267,7 @@ class StepUpscale(ctk.CTkFrame):
         self.btn_stop.configure(state="disabled")
         self._update_status("Stopping after current item...")
         self._update_task("Cancellation requested...")
+        self._log_event("Cancellation requested by user.")
 
     def _run_upscale_batch(self, factor: int, options: UpscaleOptions) -> None:
         """
@@ -286,6 +308,11 @@ class StepUpscale(ctk.CTkFrame):
         success_count = 0
         failed_count = 0
         started_at = time.monotonic()
+        self._log_event(
+            f"Resolved datasource: scope={scope}, saved_search_id={saved_search_id}, "
+            f"collection_id={collection_id}, status={status_filter}, "
+            f"process_limit={process_limit or 'all'}, expected_total={expected_total or 'unknown'}"
+        )
 
         try:
             while True:
@@ -315,7 +342,9 @@ class StepUpscale(ctk.CTkFrame):
                 )
 
                 if not items:
+                    self._log_event(f"Page {page_num}: no items returned, stopping pagination.")
                     break
+                self._log_event(f"Page {page_num}: loaded {len(items)} item(s) from start_index={start_index}.")
 
                 if expected_total <= 0:
                     expected_total = max(expected_total, processed_count + len(items))
@@ -350,6 +379,10 @@ class StepUpscale(ctk.CTkFrame):
 
                 # Pagination rule: partial page means no more data
                 if self._stop_event.is_set() or len(items) < page_size:
+                    if len(items) < page_size:
+                        self._log_event(
+                            f"Page {page_num}: received partial page ({len(items)} < {page_size}), reached final page."
+                        )
                     break
                 start_index += page_size
 
@@ -366,6 +399,8 @@ class StepUpscale(ctk.CTkFrame):
             )
         except Exception as e:
             logger.error(f"Upscale batch error: {e}", exc_info=True)
+            self._log_event(f"Batch error: {e}")
+            self._log_event(traceback.format_exc())
             self.after(0, lambda err=str(e): self._on_upscale_error(err))
 
     def _process_single_item(self, item_id: int, factor: int, options: UpscaleOptions) -> bool:
@@ -373,50 +408,87 @@ class StepUpscale(ctk.CTkFrame):
         client = self.controller.session.daminion_client
 
         if self._stop_event.is_set():
+            self._log_event(f"Item {item_id}: skipped due to cancellation.")
             return False
 
         self._update_task(f"Item {item_id}: checking out...")
         self._update_status(f"Item {item_id}: checking out...")
+        self._log_event(f"Item {item_id}: checkout started.")
         success = client.checkout_item(item_id)
         if not success:
             logger.error(f"Checkout failed for item {item_id}")
+            self._log_event(f"Item {item_id}: checkout failed.")
             return False
+        self._log_event(f"Item {item_id}: checkout successful.")
 
         try:
             if self._stop_event.is_set():
+                self._log_event(f"Item {item_id}: cancelled before download.")
                 return False
             self._update_task(f"Item {item_id}: downloading...")
             self._update_status(f"Item {item_id}: downloading original...")
             original_path = client.download_original(item_id)
             if not original_path:
                 self._update_status(f"Item {item_id}: download failed.")
+                self._log_event(f"Item {item_id}: download failed.")
                 return False
+            self._log_event(f"Item {item_id}: downloaded original to '{original_path}'.")
 
             if self._stop_event.is_set():
+                self._log_event(f"Item {item_id}: cancelled before upscale.")
                 return False
             self._update_task(f"Item {item_id}: upscaling...")
             self._update_status(f"Item {item_id}: upscaling {factor}x...")
+            in_size = self._probe_image_size(original_path)
+            if in_size:
+                self._log_event(f"Item {item_id}: input size {in_size[0]}x{in_size[1]}.")
             upscaled_path = self._upscaler.upscale(
                 input_path=original_path,
                 factor=factor,
-                status_callback=self._update_status,
+                status_callback=self._on_upscaler_status,
                 options=options,
             )
+            self._log_event(f"Item {item_id}: upscaled output generated at '{upscaled_path}'.")
+            try:
+                upscaled_file_size = int(upscaled_path.stat().st_size)
+            except Exception:
+                upscaled_file_size = -1
+            if upscaled_file_size <= 0:
+                self._log_event(
+                    f"Item {item_id}: output file missing or empty at '{upscaled_path}'."
+                )
+                return False
+            self._log_event(f"Item {item_id}: output file size {upscaled_file_size} bytes.")
+            out_size = self._probe_image_size(upscaled_path)
+            if out_size:
+                self._log_event(f"Item {item_id}: output size {out_size[0]}x{out_size[1]}.")
+            if in_size and out_size and out_size[0] <= in_size[0]:
+                self._log_event(
+                    f"Item {item_id}: WARNING output width {out_size[0]} did not increase from {in_size[0]}."
+                )
 
             if self._stop_event.is_set():
+                self._log_event(f"Item {item_id}: cancelled before check-in.")
                 return False
             self._update_task(f"Item {item_id}: checking back in...")
             self._update_status(f"Item {item_id}: checking in...")
-            success = client.checkin_item(item_id, str(upscaled_path))
+            checkin_msg = self._build_checkin_summary(options, factor)
+            self._log_event(f"Item {item_id}: check-in message: {checkin_msg}")
+            success = client.checkin_item(item_id, str(upscaled_path), message=checkin_msg)
             if success:
+                self._flush_upscale_cache(item_id, original_path, upscaled_path)
                 self._update_status(f"Item {item_id}: check-in complete.")
+                self._log_event(f"Item {item_id}: check-in complete.")
                 return True
             self._update_status(f"Item {item_id}: check-in failed.")
+            self._log_event(f"Item {item_id}: check-in failed.")
             return False
 
         except Exception as e:
-            logger.error(f"Upscale workflow error for item {item_id}: {e}")
+            logger.error(f"Upscale workflow error for item {item_id}: {e}", exc_info=True)
             self._update_status(f"Item {item_id}: error - {e}")
+            self._log_event(f"Item {item_id}: error - {e}")
+            self._log_event(traceback.format_exc())
             return False
 
     def _update_status(self, text: str):
@@ -427,6 +499,10 @@ class StepUpscale(ctk.CTkFrame):
     def _update_task(self, text: str):
         if self.winfo_exists():
             self.after(0, lambda: self.lbl_task.configure(text=f"Current task: {text}"))
+
+    def _on_upscaler_status(self, text: str):
+        self._update_status(text)
+        self._log_event(text)
 
     def _update_progress(self, processed_count: int, total_count: int, started_at: float):
         if not self.winfo_exists():
@@ -453,6 +529,11 @@ class StepUpscale(ctk.CTkFrame):
 
     def _format_duration(self, seconds: float) -> str:
         seconds = max(int(seconds), 0)
+        if seconds > 48 * 3600:
+            days, remainder = divmod(seconds, 86400)
+            hours, remainder = divmod(remainder, 3600)
+            mins, _ = divmod(remainder, 60)
+            return f"{days} days, {hours} hours, {mins} minutes"
         hours, remainder = divmod(seconds, 3600)
         mins, secs = divmod(remainder, 60)
         if hours > 0:
@@ -517,6 +598,9 @@ class StepUpscale(ctk.CTkFrame):
             self.lbl_task.configure(text="Current task: Complete")
             if processed > 0:
                 self.progress_bar.set(1.0)
+            self._log_event(
+                f"Run finished. processed={processed}, succeeded={success}, failed={failed}, cancelled={cancelled}"
+            )
             messagebox.showinfo(
                 "Upscale Stopped" if cancelled else "Upscale Complete",
                 f"Processed: {processed}\nSucceeded: {success}\nFailed: {failed}",
@@ -537,6 +621,7 @@ class StepUpscale(ctk.CTkFrame):
             self.overwrite_checkbox.configure(state="normal")
             self.lbl_status.configure(text=f"Upscale batch failed: {error_message}")
             self.lbl_task.configure(text="Current task: Error")
+            self._log_event(f"Run failed: {error_message}")
             messagebox.showerror("Upscale Error", error_message)
 
     def refresh(self):
@@ -557,6 +642,7 @@ class StepUpscale(ctk.CTkFrame):
         self.lbl_counter.configure(text="0 / 0 images")
         self.lbl_eta.configure(text="ETA: --")
         self._on_workflow_change(self.workflow_var.get())
+        self._log_event("Upscale view refreshed.")
 
     def _build_upscale_options(self) -> UpscaleOptions:
         quality = 95
@@ -593,3 +679,88 @@ class StepUpscale(ctk.CTkFrame):
         self._stop_event.set()
         if self._worker:
             self._worker.shutdown()
+
+    def _build_checkin_summary(self, options: UpscaleOptions, factor: int) -> str:
+        output_fmt = options.output_format.upper() if options.output_format else "KEEP"
+        return (
+            f"Upscaled using {options.workflow} {factor}x "
+            f"(precision={options.precision}, output={output_fmt}, "
+            f"quality={options.jpeg_quality}, denoise={options.denoise_strength:.2f}, "
+            f"sharpen={options.sharpen_amount:.2f})"
+        )
+
+    def _probe_image_size(self, image_path):
+        try:
+            from PIL import Image
+
+            with Image.open(image_path) as img:
+                return img.size
+        except Exception:
+            return None
+
+    def _clear_log(self):
+        if self.winfo_exists():
+            self.console.configure(state="normal")
+            self.console.delete("1.0", "end")
+            self.console.insert("0.0", "--- Upscale log initialized ---\n")
+            self.console.configure(state="disabled")
+
+    def _log_event(self, message: str):
+        timestamp = time.strftime("%H:%M:%S")
+        line = f"[{timestamp}] {message}"
+        logger.info(line)
+        if self.winfo_exists():
+            self.after(0, lambda: self._append_log_line(line))
+
+    def _append_log_line(self, line: str):
+        if not self.winfo_exists():
+            return
+        self.console.configure(state="normal")
+        self.console.insert("end", f"{line}\n")
+        self.console.see("end")
+        self.console.configure(state="disabled")
+
+    def _flush_upscale_cache(self, item_id: int, original_path, upscaled_path) -> None:
+        """
+        Remove cached temp files for this item after successful check-in.
+        """
+        client = self.controller.session.daminion_client
+        cache_root = getattr(client, "temp_dir", None)
+        if not cache_root:
+            return
+
+        try:
+            cache_root = Path(cache_root).resolve()
+        except Exception:
+            return
+
+        candidates = set()
+        for p in (original_path, upscaled_path):
+            try:
+                if p:
+                    candidates.add(Path(p))
+            except Exception:
+                continue
+
+        # Also sweep any stale variants for this item's original/upscaled temp files.
+        try:
+            candidates.update(cache_root.glob(f"{item_id}_original*"))
+            candidates.update(cache_root.glob(f"{item_id}_original_upscaled*"))
+        except Exception:
+            pass
+
+        removed = 0
+        for cand in candidates:
+            try:
+                resolved = cand.resolve()
+                resolved.relative_to(cache_root)
+                if resolved.exists() and resolved.is_file():
+                    resolved.unlink()
+                    removed += 1
+            except Exception:
+                continue
+
+        if removed > 0:
+            self._log_event(
+                f"Item {item_id}: flushed upscale cache ({removed} file(s) removed)."
+            )
