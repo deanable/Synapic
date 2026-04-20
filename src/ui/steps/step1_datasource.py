@@ -434,26 +434,105 @@ class Step1Datasource(ctk.CTkFrame):
             messagebox.showerror("Error", "Not connected to Daminion.")
             return
 
+        self.lbl_total_count.configure(text="Loading items for upscale...")
         self._worker.submit(self._fetch_items_and_navigate_to_upscale)
 
     def _fetch_items_and_navigate_to_upscale(self):
         try:
+            filters = self._get_current_scope_filters()
+            self._save_filters_to_datasource(filters)
+            ds = self.controller.session.datasource
+
             items = self.controller.session.daminion_client.get_items_filtered(
-                scope=self.scope_var.get(),
-                limit=10,
-                offset=0
+                scope=filters["scope"],
+                saved_search_id=filters["saved_search_id"],
+                collection_id=filters["collection_id"],
+                search_term=filters["search_term"],
+                untagged_fields=filters["untagged_fields"],
+                status_filter=filters["status_filter"],
+                max_items=min(ds.max_items, 500) if ds.max_items and ds.max_items > 0 else 500,
+                start_index=0,
             )
 
             if not items:
-                self.after(0, lambda: messagebox.showinfo("Info", "No items found in current scope."))
+                self.after(
+                    0,
+                    lambda: messagebox.showinfo(
+                        "Info", "No items found with current filters."
+                    ),
+                )
+                self.after(0, lambda: self.lbl_total_count.configure(text=""))
                 return
 
-            self.controller.session.current_items = items
+            self.controller.session.upscale_items = items
+            self.after(0, lambda: self.lbl_total_count.configure(text=""))
             self.after(0, lambda: self.controller.show_step("StepUpscale"))
         except Exception as e:
             self.logger.error(f"Error fetching items for upscale: {e}")
             err_msg = str(e)
-            self.after(0, lambda: messagebox.showerror("Error", f"Failed to fetch items: {err_msg}"))
+            self.after(
+                0, lambda: messagebox.showerror("Error", f"Failed to fetch items: {err_msg}")
+            )
+            self.after(0, lambda: self.lbl_total_count.configure(text=""))
+
+    def _get_current_scope_filters(self) -> dict:
+        """Resolve the active scope + filter settings from the current Step 1 UI."""
+        if not hasattr(self, "tabs"):
+            raise RuntimeError("UI not fully initialized (tabs missing)")
+
+        tab = self.tabs.get()
+        scope = "all"
+        ss_id = None
+        col_id = None
+        search_term = None
+
+        if tab == "Saved Searches":
+            scope = "saved_search"
+            ss_name = self.ss_var.get()
+            ss_id = getattr(self, "_ss_map", {}).get(ss_name)
+            if not ss_id:
+                raise ValueError("No saved search selected")
+        elif tab == "Shared Collections":
+            scope = "collection"
+            col_name = self.col_var.get()
+            col_id = getattr(self, "_col_map", {}).get(col_name)
+            if not col_id:
+                raise ValueError("No collection selected")
+        elif tab == "Keyword Search":
+            scope = "search"
+            search_term = self.search_entry.get()
+            if not search_term:
+                raise ValueError("No search term entered")
+
+        status = self.status_var.get()
+        untagged = []
+        if hasattr(self, "chk_untagged_kws") and self.chk_untagged_kws.get():
+            untagged.append("Keywords")
+        if hasattr(self, "chk_untagged_cats") and self.chk_untagged_cats.get():
+            untagged.append("Category")
+        if hasattr(self, "chk_untagged_desc") and self.chk_untagged_desc.get():
+            untagged.append("Description")
+
+        return {
+            "scope": scope,
+            "saved_search_id": ss_id,
+            "collection_id": col_id,
+            "search_term": search_term,
+            "status_filter": status,
+            "untagged_fields": untagged,
+        }
+
+    def _save_filters_to_datasource(self, filters: dict) -> None:
+        """Persist the active Step 1 filters into session.datasource for later steps."""
+        ds = self.controller.session.datasource
+        ds.daminion_scope = filters["scope"]
+        ds.daminion_saved_search_id = filters["saved_search_id"] or ""
+        ds.daminion_collection_id = filters["collection_id"] or ""
+        ds.daminion_search_term = filters["search_term"] or ""
+        ds.status_filter = filters["status_filter"]
+        ds.daminion_untagged_keywords = "Keywords" in filters["untagged_fields"]
+        ds.daminion_untagged_categories = "Category" in filters["untagged_fields"]
+        ds.daminion_untagged_description = "Description" in filters["untagged_fields"]
 
     def _open_dedup_step(self):
         """

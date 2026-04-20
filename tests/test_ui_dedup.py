@@ -90,6 +90,11 @@ class TestableStepDedup(StepDedup):
         self.controller = controller
         self.session = controller.session
         self.logger = MagicMock()
+        self.is_confirming_action = False
+        self.default_btn_fg = None
+        self.default_btn_hover = None
+        self.default_btn_text = "Apply Deduplication"
+        self.apply_btn = MagicMock()
         
         self.threshold_var = MagicMock()
         self.threshold_var.get.return_value = 95.0
@@ -97,6 +102,9 @@ class TestableStepDedup(StepDedup):
         self.algorithm_var.get.return_value = "phash"
         
         self.progress_frame = MagicMock()
+        self.progress_bar = MagicMock()
+        self.progress_label = MagicMock()
+        self.abort_btn = MagicMock()
         self.scan_btn = MagicMock()
         self.initial_label = MagicMock()
         self.group_frames = []
