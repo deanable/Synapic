@@ -7,13 +7,6 @@ It complements the narrower tests under `tests/unit/core/dedup`.
 """
 
 import unittest
-from unittest.mock import MagicMock
-import sys
-
-# Mocking modules that might not be available
-sys.modules['PIL'] = MagicMock()
-sys.modules['PIL.Image'] = MagicMock()
-sys.modules['imagehash'] = MagicMock()
 
 from src.core.dedup.dedup_strategies import apply_keep_first, DedupDecision
 from src.core.dedup.dedup_engine import DuplicateGroup

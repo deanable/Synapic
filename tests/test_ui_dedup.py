@@ -16,6 +16,7 @@ run in headless CI environments.
 import pytest
 from unittest.mock import MagicMock, patch, ANY
 import sys
+import importlib.util
 
 # -------------------------------------------------------------------------
 # MOCKING UI LIBRARIES
@@ -38,9 +39,8 @@ module_mock.CTkFrame = MockCTkFrame
 sys.modules["customtkinter"] = module_mock
 sys.modules["tkinter"] = MagicMock()
 sys.modules["tkinter.messagebox"] = MagicMock()
-sys.modules["PIL"] = MagicMock()
-sys.modules["PIL.Image"] = MagicMock()
-sys.modules["PIL.ImageTk"] = MagicMock()
+if importlib.util.find_spec("PIL.ImageTk") is None:
+    sys.modules["PIL.ImageTk"] = MagicMock()
 
 # Import original classes
 from src.ui.steps.step1_datasource import Step1Datasource

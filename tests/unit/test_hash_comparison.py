@@ -6,13 +6,6 @@ This module verifies hash-comparison logic from the broader unit-test suite and
 acts as a guard against regressions in duplicate detection scoring.
 """
 
-import sys
-from unittest.mock import MagicMock
-
-# Mock PIL and imagehash if they aren't installed in the test environment
-sys.modules['PIL'] = MagicMock()
-sys.modules['imagehash'] = MagicMock()
-
 import pytest
 from src.core.dedup.hash_comparison import are_hashes_similar
 

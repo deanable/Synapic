@@ -203,6 +203,37 @@ class ProcessingManager:
         self.thread = threading.Thread(target=self._run_job, daemon=True)
         self.thread.start()
 
+    def _emit_progress(
+        self,
+        pct: float,
+        current: int,
+        total: int,
+        *,
+        more_pages: bool,
+        elapsed_seconds: float,
+        etc_seconds: float,
+    ) -> None:
+        """
+        Emit progress updates with backward compatibility for older callbacks.
+        """
+        try:
+            self.progress(
+                pct,
+                current,
+                total,
+                more_pages=more_pages,
+                elapsed_seconds=elapsed_seconds,
+                etc_seconds=etc_seconds,
+            )
+            return
+        except TypeError:
+            pass
+
+        try:
+            self.progress(pct, current, total, more_pages)
+        except TypeError:
+            self.progress(pct, current, total)
+
     def abort(self):
         """
         Request abortion of the current processing job.
@@ -358,7 +389,7 @@ class ProcessingManager:
                         untagged_fields.append("Category")
                     if ds.daminion_untagged_description:
                         untagged_fields.append("Description")
-                    expected_total = (
+                    raw_expected_total = (
                         self.session.daminion_client.get_filtered_item_count(
                             scope=ds.daminion_scope,
                             saved_search_id=ds.daminion_saved_search_id
@@ -371,6 +402,15 @@ class ProcessingManager:
                             force_refresh=True,
                         )
                     )
+                    if isinstance(raw_expected_total, (int, float)):
+                        expected_total = int(raw_expected_total)
+                    else:
+                        self.logger.warning(
+                            "Pre-flight count returned non-numeric value (%r); "
+                            "falling back to dynamic totals.",
+                            raw_expected_total,
+                        )
+                        expected_total = 0
                     self.logger.info(
                         f"PRE-FLIGHT COUNT: server reports {expected_total} record(s) "
                         f"matching current filters (scope={ds.daminion_scope})"
@@ -460,7 +500,7 @@ class ProcessingManager:
                     effective_total = min(effective_total, process_limit)
                 remaining = max(effective_total - processed, 0)
                 etc = (elapsed / processed * remaining) if processed > 0 else 0
-                self.progress(
+                self._emit_progress(
                     self.session.processed_items / max(effective_total, 1),
                     self.session.processed_items,
                     effective_total,
@@ -526,7 +566,7 @@ class ProcessingManager:
                         effective_total = min(effective_total, process_limit)
                     remaining = max(effective_total - processed, 0)
                     etc = (elapsed / processed * remaining) if processed > 0 else 0
-                    self.progress(
+                    self._emit_progress(
                         self.session.processed_items / max(effective_total, 1),
                         self.session.processed_items,
                         effective_total,

@@ -1,9 +1,9 @@
 import logging
 from tkinter import messagebox
-from PIL import Image
 
 import customtkinter as ctk
 
+from src.core.upscaler import Swin2SRUpscaler
 from src.utils.background_worker import BackgroundWorker
 
 logger = logging.getLogger(__name__)
@@ -17,6 +17,7 @@ class StepUpscale(ctk.CTkFrame):
         super().__init__(parent)
         self.controller = controller
         self._worker = BackgroundWorker(name="UpscaleWorker")
+        self._upscaler = Swin2SRUpscaler()
 
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
@@ -40,7 +41,7 @@ class StepUpscale(ctk.CTkFrame):
         )
         self.lbl_status.pack(pady=20)
 
-        # Upscale Settings (Placeholder for ESRGAN params)
+        # Upscale Settings
         settings_frame = ctk.CTkFrame(content_frame, fg_color="transparent")
         settings_frame.pack(fill="x", padx=20, pady=10)
 
@@ -137,30 +138,16 @@ class StepUpscale(ctk.CTkFrame):
                 self._update_status("Download failed.")
                 return False
 
-            original_path_str = str(original_path)
-
-            # 3. Upscale (Mock)
-            self._update_status(f"Upscaling image by {factor}x using ESRGAN...")
-
-            # TODO: Integrate real ONNX / HuggingFace ESRGAN model here.
-            # For scaffolding, we just resize the image using PIL as a mock "upscale"
-            upscaled_path_str = original_path_str.replace(".jpg", "_upscaled.jpg").replace(".png", "_upscaled.png")
-            if upscaled_path_str == original_path_str:
-                 upscaled_path_str = original_path_str + "_upscaled.jpg"
-
-            try:
-                with Image.open(original_path_str) as img:
-                    new_size = (int(img.width * factor), int(img.height * factor))
-                    upscaled_img = img.resize(new_size, Image.Resampling.LANCZOS)
-                    upscaled_img.save(upscaled_path_str)
-            except Exception as e:
-                logger.error(f"Upscale failed: {e}")
-                self._update_status(f"Upscale failed: {e}")
-                return False
+            # 3. Upscale with a real model
+            upscaled_path = self._upscaler.upscale(
+                input_path=original_path,
+                factor=factor,
+                status_callback=self._update_status,
+            )
 
             # 4. Checkin
             self._update_status("Checking in new version...")
-            success = client.checkin_item(item_id, upscaled_path_str)
+            success = client.checkin_item(item_id, str(upscaled_path))
             if success:
                 self._update_status("Successfully checked in upscaled version!")
                 return True

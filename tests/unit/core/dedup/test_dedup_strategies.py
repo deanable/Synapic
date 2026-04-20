@@ -7,14 +7,9 @@ item when duplicate groups are evaluated under different selection rules.
 """
 
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import os
-import sys
 import time
-
-# Mock out dependencies to prevent import errors in unit test environment
-sys.modules['PIL'] = MagicMock()
-sys.modules['imagehash'] = MagicMock()
 
 from src.core.dedup.dedup_strategies import get_file_metadata
 

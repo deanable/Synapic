@@ -849,8 +849,7 @@ class DaminionClient:
         Check out an item for editing (version control).
         """
         try:
-            with self._get_api() as api:
-                return api.version_control.checkout([item_id])
+            return self._api.version_control.checkout([item_id])
         except Exception as e:
             logger.error(f"Failed to check out item {item_id}: {e}")
             return False
@@ -860,9 +859,8 @@ class DaminionClient:
         Check in an item as a new version.
         """
         try:
-            with self._get_api() as api:
-                api.version_control.checkin(item_id, file_path)
-                return True
+            self._api.version_control.checkin(item_id, file_path)
+            return True
         except Exception as e:
             logger.error(f"Failed to check in item {item_id}: {e}")
             return False

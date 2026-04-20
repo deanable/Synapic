@@ -26,6 +26,7 @@ import urllib.parse
 import urllib.error
 import json
 import time
+import requests
 from typing import Dict, List, Optional, Any, Union, Tuple
 from dataclasses import dataclass
 from enum import Enum
@@ -262,6 +263,7 @@ class DaminionAPI:
         self.downloads = DownloadsAPI(self)
         self.imports = ImportsAPI(self)
         self.user_manager = UserManagerAPI(self)
+        self.version_control = VersionControlAPI(self)
         
         logging.info(f"Initialized DaminionAPI for {self.base_url}")
     
@@ -361,6 +363,7 @@ class DaminionAPI:
         method: str = "GET",
         data: Optional[Dict] = None,
         params: Optional[Dict] = None,
+        files: Optional[Dict[str, Any]] = None,
         skip_auth: bool = False,
         skip_rate_limit: bool = False
     ) -> Any:
@@ -416,8 +419,38 @@ class DaminionAPI:
             headers=headers,
             method=method
         )
-        
+
         try:
+            # Multipart uploads (e.g. CheckIn) are easier and more robust via requests.
+            if files:
+                upload_headers = {"Accept": "application/json"}
+                response = requests.request(
+                    method=method,
+                    url=url,
+                    data=data or {},
+                    files=files,
+                    headers=upload_headers,
+                    cookies=self._cookies,
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+                self._cookies.update(response.cookies.get_dict())
+
+                content_type = response.headers.get("Content-Type", "")
+                if "application/json" in content_type:
+                    result = response.json()
+                    if isinstance(result, dict):
+                        if not result.get('success', True):
+                            error_msg = result.get('error', 'Unknown error')
+                            error_code = result.get('errorCode', 0)
+                            raise DaminionAPIError(f"API Error {error_code}: {error_msg}")
+
+                        if 'data' in result:
+                            return result['data']
+                    return result
+
+                return response.content
+
             with urllib.request.urlopen(req, timeout=self.timeout) as response:
                 # Store cookies from response
                 cookie_header = response.getheader('Set-Cookie')

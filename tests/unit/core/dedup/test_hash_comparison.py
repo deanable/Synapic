@@ -7,12 +7,6 @@ duplicate-grouping logic.
 """
 
 import pytest
-import sys
-from unittest.mock import MagicMock
-
-import unittest.mock
-# Mock image processing dependencies to allow tests to run in environments lacking them
-unittest.mock.patch.dict('sys.modules', {'PIL': MagicMock(), 'PIL.Image': MagicMock(), 'imagehash': MagicMock()}).start()
 
 from src.core.dedup.hash_comparison import (
     calculate_hamming_distance,

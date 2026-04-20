@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
 
 from src.core.daminion_client import DaminionClient
-from tests.verify_metadata import get_record_metadata
+from tests.integration.verify_metadata import get_record_metadata
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
