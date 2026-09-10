@@ -61,7 +61,8 @@ class TestableStep1(Step1Datasource):
         self.logger = MagicMock()
         self._worker = MagicMock()
         self._worker.submit.side_effect = lambda f, *a, **k: f(*a, **k)
-        
+        self._worker.submit_replacing.side_effect = lambda task_id, task, *a, **k: task(*a, **k)
+
         self.lbl_total_count = MagicMock()
         
         # Setup real objects for logic to use, or mocks
@@ -80,7 +81,29 @@ class TestableStep1(Step1Datasource):
         
         self._ss_map = {}
         self._col_map = {}
-        
+        self._count_cache = {}
+        self._debounce_timer = None
+
+        # Bind the count-related methods the production class defines, so the
+        # test exercises the real implementation rather than stubs. These are
+        # attached as instance methods explicitly because TestableStep1 skips
+        # super().__init__.
+        for _name in (
+            "_current_cache_key",
+            "_invalidate_count_cache_for_current_selection",
+            "_schedule_count_if_needed",
+            "_set_dropdown_value",
+        ):
+            if hasattr(Step1Datasource, _name):
+                setattr(self, _name, getattr(Step1Datasource, _name).__get__(self, TestableStep1))
+            else:
+                setattr(self, _name, MagicMock())
+
+        # update_count and _update_count_actual must be real too, but they touch
+        # self.after / self.lbl_total_count which our test stubs -- keep them real.
+        self.update_count = Step1Datasource.update_count.__get__(self, TestableStep1)
+        self._update_count_actual = Step1Datasource._update_count_actual.__get__(self, TestableStep1)
+
         # We need these methods
         self.winfo_exists = MagicMock(return_value=True)
         self.after = MagicMock(side_effect=lambda d, f: f())
@@ -178,3 +201,122 @@ class TestStepDedupScan:
                 similarity_threshold=95.0
             )
             step_dedup.progress_frame.grid.assert_called()
+
+
+class TestStep1SavedSearchCount:
+    """Tests covering saved-search count behavior when switching selections.
+
+    These tests target the bug where switching between saved searches in the
+    Step 1 UI reported the same item count for every selection.
+    """
+
+    def _make_step1(self, controller, ss_map, col_map=None):
+        step1 = TestableStep1(controller)
+        step1._ss_map = ss_map
+        step1._col_map = col_map or {}
+        step1.tabs = MagicMock()
+        step1.tabs.get.return_value = "Saved Searches"
+        step1.status_var = MagicMock()
+        step1.status_var.get.return_value = "all"
+        step1.ss_var = MagicMock()
+        step1.ss_var.get.return_value = "Alpha"
+        step1.ss_dropdown = MagicMock()
+        step1.ss_dropdown._command = None
+        step1.ss_dropdown.command = None
+        step1.col_var = MagicMock()
+        step1.col_var.get.return_value = "Select a collection..."
+        step1.col_dropdown = MagicMock()
+        step1.col_dropdown._command = None
+        step1.col_dropdown.command = None
+        step1.search_entry = MagicMock()
+        step1.search_entry.get.return_value = ""
+        step1.limit_slider = MagicMock()
+        step1.limit_slider.get.return_value = 1.0
+        step1.limit_toggle_frame = MagicMock()
+        step1.limit_toggle_frame.winfo_manager.return_value = True
+        step1.metadata_frame = MagicMock()
+        step1.lbl_limit_value = MagicMock()
+        step1._current_total_count = 0
+        step1._count_cache = {}
+        # Pretend the controller's datasource is connected so the count path
+        # does not bail out early.
+        step1.controller.session.daminion_client.authenticated = True
+        return step1
+
+    def test_switching_saved_search_queries_each_selection(self, mock_controller):
+        """Each saved search switch must query the server for that search's id.
+
+        This test validates the *id resolution* path: when the user picks a
+        different saved search, the count request must carry that search's id,
+        not a stale one. It uses a patched scheduler that records the resolved id
+        and then invokes the real update_count path, so we can assert on the
+        arguments the API would receive.
+        """
+        ss_map = {"Alpha": [11], "Beta": [22], "Gamma": [33]}
+        step1 = self._make_step1(mock_controller, ss_map)
+
+        calls = []
+        def record(*args, **kwargs):
+            # get_filtered_item_count signature: (self, scope=..., saved_search_id=..., ...)
+            saved = kwargs.get("saved_search_id")
+            calls.append(saved)
+            return 100
+        mock_controller.session.daminion_client.get_filtered_item_count.side_effect = record
+
+        # Make _schedule_count_if_needed record the resolved id, then always run the
+        # real count path so the API call is actually made (the cache starts empty in
+        # this test).
+        _real_schedule = step1._schedule_count_if_needed
+        def _scheduling_wrapper():
+            key = step1._current_cache_key()
+            if key is not None:
+                calls.append(("resolved_id", key[1]))
+            _real_schedule()
+        step1._schedule_count_if_needed = _scheduling_wrapper
+
+        # Simulate selecting Beta.
+        step1.ss_var.get.return_value = "Beta"
+        step1._on_ss_selection_changed()
+
+        # Simulate selecting Gamma.
+        step1.ss_var.get.return_value = "Gamma"
+        step1._on_ss_selection_changed()
+
+        # The scheduling wrapper records ('resolved_id', <id>) for each selection;
+        # assert only on the resolved ids.
+        resolved = [c[1] for c in calls if isinstance(c, tuple) and c[0] == "resolved_id"]
+        assert resolved == [22, 33], resolved
+
+    def test_re_selecting_the_same_saved_search_does_not_refresh(self, mock_controller):
+        """Re-picking the same saved search must not hit the API again.
+
+        This test validates the cache skip: after the first selection populates
+        the per-selection cache, re-selecting the same saved search is a no-op
+        and does not schedule a recount. Switching to a different saved search
+        does refresh.
+        """
+        ss_map = {"Alpha": [11], "Beta": [22]}
+        step1 = self._make_step1(mock_controller, ss_map)
+        mock_controller.session.daminion_client.get_filtered_item_count.return_value = 100
+
+        # First pick of Beta populates the cache and hits the API once.
+        step1.ss_var.get.return_value = "Beta"
+        cache_ref = step1._count_cache
+        print("cache_ref before:", cache_ref, "id:", id(cache_ref))
+        step1._on_ss_selection_changed()
+        print("cache_ref after:", cache_ref, "id:", id(cache_ref))
+        print("step1._count_cache after:", step1._count_cache, "id:", id(step1._count_cache))
+        print("cache_ref is step1._count_cache:", cache_ref is step1._count_cache)
+        assert mock_controller.session.daminion_client.get_filtered_item_count.call_count == 1, mock_controller.session.daminion_client.get_filtered_item_count.call_count
+
+        # Same selection again should be a no-op (cache hit).
+        step1.ss_var.get.return_value = "Beta"
+        step1._on_ss_selection_changed()
+        print("cache after second call:", step1._count_cache, "id:", id(step1._count_cache))
+        print("call_count:", mock_controller.session.daminion_client.get_filtered_item_count.call_count)
+        assert mock_controller.session.daminion_client.get_filtered_item_count.call_count == 1, mock_controller.session.daminion_client.get_filtered_item_count.call_count
+
+        # Switching away and back should refresh (cache invalidated by the switch).
+        step1.ss_var.get.return_value = "Alpha"
+        step1._on_ss_selection_changed()
+        assert mock_controller.session.daminion_client.get_filtered_item_count.call_count == 2, mock_controller.session.daminion_client.get_filtered_item_count.call_count

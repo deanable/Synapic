@@ -201,11 +201,14 @@ echo ===========================================================================
 echo.
 
 if exist "main.py" (
+    echo [*] Launching Synapic...
     if exist ".venv\Scripts\pythonw.exe" (
-        .venv\Scripts\pythonw.exe "main.py"
+        start /b "" .venv\Scripts\pythonw.exe "main.py"
     ) else (
-        pythonw "main.py"
+        start /b "" pythonw "main.py"
     )
+    echo [*] Application launched. Closing launcher window...
+    timeout /t 2 /nobreak >nul
 ) else (
     color 0C
     echo [ERROR] main.py not found in current directory!

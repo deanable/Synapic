@@ -151,13 +151,17 @@ echo.
 
 :: 4. Launch Main (windowless — no console will appear)
 if exist "main.py" (
+    echo [*] Launching Synapic...
     :: Prefer pythonw.exe from the venv (suppresses console window).
     :: Fall back to the system pythonw if the venv one is missing.
+    :: Launch detached so the launcher window can close once the GUI is up.
     if exist ".venv\Scripts\pythonw.exe" (
-        .venv\Scripts\pythonw.exe "main.py"
+        start /b "" .venv\Scripts\pythonw.exe "main.py"
     ) else (
-        pythonw "main.py"
+        start /b "" pythonw "main.py"
     )
+    echo [*] Application launched. Closing launcher window...
+    timeout /t 2 /nobreak >nul
 ) else (
     color 0C
     echo [ERROR] main.py not found in current directory!

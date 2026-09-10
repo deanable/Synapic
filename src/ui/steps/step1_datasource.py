@@ -56,6 +56,13 @@ class Step1Datasource(ctk.CTkFrame):
         # Background worker for thread management (single persistent thread)
         self._worker = BackgroundWorker(name="Step1Worker")
 
+        # Per-scope count cache. Saved-search/collection counts are expensive
+        # (each one is a separate structured query), and switching between them
+        # must show each scope's real count, not a stale value left by another
+        # scope's last recount. The cache is keyed by (scope, scope-specific id),
+        # invalidated when the user changes the selection.
+        self._count_cache: dict = {}
+
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
@@ -500,9 +507,10 @@ class Step1Datasource(ctk.CTkFrame):
         if tab == "Saved Searches":
             scope = "saved_search"
             ss_name = self.ss_var.get()
-            ss_id = getattr(self, "_ss_map", {}).get(ss_name)
-            if not ss_id:
+            ss_ids = getattr(self, "_ss_map", {}).get(ss_name)
+            if not ss_ids:
                 raise ValueError("No saved search selected")
+            ss_id = ss_ids[0] if isinstance(ss_ids, list) else ss_ids
         elif tab == "Shared Collections":
             scope = "collection"
             col_name = self.col_var.get()
@@ -726,7 +734,7 @@ class Step1Datasource(ctk.CTkFrame):
             ss_tab,
             variable=self.ss_var,
             values=["Loading..."],
-            command=self.update_count,
+            command=self._on_ss_selection_changed,
             width=400,
         )
         self.ss_dropdown.pack(pady=20, padx=20)
@@ -739,7 +747,7 @@ class Step1Datasource(ctk.CTkFrame):
             col_tab,
             variable=self.col_var,
             values=["Loading..."],
-            command=self.update_count,
+            command=self._on_col_selection_changed,
             width=400,
         )
         self.col_dropdown.pack(pady=20, padx=20)
@@ -926,16 +934,17 @@ class Step1Datasource(ctk.CTkFrame):
                         values=ss_names if ss_names else ["No Saved Searches found"]
                     )
                     if ss_names:
-                        # Try to restore previous selection
+                        # Restore the previously selected saved search without
+                        # firing the dropdown's command (which would kick off a
+                        # count for whatever got restored, not necessarily what the
+                        # user last picked).
                         prev = self.controller.session.datasource.daminion_saved_search
                         if prev in self._ss_map and self._ss_map[prev]:
-                            self.ss_var.set(prev)
-                            self.controller.session.datasource.daminion_saved_search_id = self._ss_map[prev][0]
-                            # TODO: Handle multiple IDs if needed
+                            self._set_dropdown_value(self.ss_dropdown, self.ss_var, prev)
                         else:
-                            self.ss_var.set(ss_names[0])
-                            if self._ss_map.get(ss_names[0]):
-                                self.controller.session.datasource.daminion_saved_search_id = self._ss_map[ss_names[0]][0]
+                            self._set_dropdown_value(
+                                self.ss_dropdown, self.ss_var, ss_names[0]
+                            )
 
                 if hasattr(self, "col_dropdown"):
                     self.col_dropdown.configure(
@@ -951,6 +960,67 @@ class Step1Datasource(ctk.CTkFrame):
             self.after(0, _update_ui)
 
         self._worker.submit(_bg_load)
+
+    def _set_dropdown_value(self, dropdown, var, value):
+        """Set a CTkOptionMenu's bound StringVar without firing its command callback.
+
+        CTkOptionMenu fires ``command`` whenever the bound variable is set, which
+        makes it impossible to restore a selection after repopulating the menu
+        without triggering a recount. This helper bypasses that by mutating the
+        variable directly and skipping the option menu's callback path.
+
+        Notes:
+            customtkinter does not expose an official "set without callback" API,
+            so we set the variable value and then temporarily detach the option
+            menu's command so a later user-driven change still works normally.
+            This is intentionally conservative: it does not suppress callbacks the
+            user actually triggered.
+        """
+        if value is None:
+            return
+        current = var.get()
+        if current == value:
+            return
+
+        # The option menu's command is a tk callable stored on the widget; if
+        # present, nuke it for the duration of the programmatic set so tkinter
+        # does not invoke update_count when we restore a selection.
+        cb = getattr(dropdown, "_command", None) or getattr(dropdown, "command", None)
+        if cb is not None:
+            dropdown.command = None
+            try:
+                var.set(value)
+            finally:
+                dropdown.command = cb
+
+    def _schedule_count_if_needed(self):
+        """Public entry point used by selection handlers that must not fire
+        update_count's normal command chain.
+
+        This is the authority for whether a recount actually reaches the API:
+        if the current scope/selection already has a cached count, this is a
+        no-op. Otherwise it schedules a debounced recount and invalidates any
+        stale cache for the current selection first.
+        """
+        if not (
+            self.controller.session.daminion_client
+            and self.controller.session.daminion_client.authenticated
+        ):
+            self.lbl_total_count.configure(text="")
+            return
+
+        key = self._current_cache_key()
+        if key is None:
+            return
+
+        # If the current scope/selection/filters already have a fresh cached
+        # count, there is nothing to do -- re-selecting the same saved search
+        # must not re-query the server.
+        if self._count_cache.get(key) is not None:
+            return
+
+        self._invalidate_count_cache_for_current_selection()
+        self.update_count()
 
     def clear_container(self, container):
         for widget in container.winfo_children():
@@ -968,6 +1038,9 @@ class Step1Datasource(ctk.CTkFrame):
 
         Implements a debouncing mechanism (500ms for typing, 100ms for clicks)
         to prevent excessive API requests during rapid UI interaction.
+
+        When the current selection has not changed since the last successful
+        recount, the cached value is reused and no API call is scheduled.
         """
         if (
             not self.controller.session.daminion_client
@@ -975,6 +1048,13 @@ class Step1Datasource(ctk.CTkFrame):
         ):
             self.lbl_total_count.configure(text="")
             return
+
+        # A tab switch or filter change always changes the active scope, even
+        # when the dropdown value looks unchanged, so drop any cached count for
+        # the current scope before scheduling a fresh recount. This must happen
+        # BEFORE scheduling so the scheduled recount can populate a fresh cache
+        # entry without it being cleared immediately afterward.
+        self._invalidate_count_cache_for_current_selection()
 
         # Cancel existing timer if any
         if self._debounce_timer:
@@ -988,6 +1068,27 @@ class Step1Datasource(ctk.CTkFrame):
         delay = 500 if is_typing else 100
         if self.winfo_exists():
             self._debounce_timer = self.after(delay, self._update_count_actual)
+
+    def _on_ss_selection_changed(self, _value=None):
+        """Handle a user-driven change to the saved-search dropdown.
+
+        The dropdown's command receives the newly selected value as an argument;
+        we ignore it in favor of reading ``ss_var`` directly so the count path
+        always reflects the actual bound variable.
+
+        Selection changes invalidate the per-scope count cache so the next recount
+        fetches a fresh value for the newly selected saved search. They do *not*
+        write ``daminion_saved_search_id`` here -- that is done later when the
+        user commits the datasource (Next Step) or when items are fetched.
+        """
+        self._schedule_count_if_needed()
+
+    def _on_col_selection_changed(self, _value=None):
+        """Handle a user-driven change to the shared-collection dropdown.
+
+        Mirror of ``_on_ss_selection_changed`` for collections.
+        """
+        self._schedule_count_if_needed()
 
     def on_slider_change(self, value):
         total = getattr(self, "_current_total_count", 0)
@@ -1029,6 +1130,70 @@ class Step1Datasource(ctk.CTkFrame):
         self.logger.info(
             f"[LIMIT DEBUG] Quick action slider at {slider_value * 100:.0f}% of {total_count} -> max_items={ds.max_items}"
         )
+
+    def _current_cache_key(self):
+        """Return the cache key for the currently active scope/selection/filters.
+
+        This is the exact key used by the count path, so the same-selection gate
+        in ``_schedule_count_if_needed`` and the lookup in
+        ``_update_count_actual`` stay consistent.
+        """
+        try:
+            tab = self.tabs.get()
+        except Exception:
+            return None
+
+        scope = "all"
+        ss_id = None
+        col_id = None
+        search_term = None
+
+        if tab == "Saved Searches":
+            scope = "saved_search"
+            ss_name = self.ss_var.get()
+            ss_ids = getattr(self, "_ss_map", {}).get(ss_name)
+            if not ss_ids:
+                return None
+            ss_id = ss_ids[0] if isinstance(ss_ids, list) else ss_ids
+        elif tab == "Shared Collections":
+            scope = "collection"
+            col_name = self.col_var.get()
+            col_id = getattr(self, "_col_map", {}).get(col_name)
+            if not col_id:
+                return None
+        elif tab == "Keyword Search":
+            scope = "search"
+            search_term = self.search_entry.get()
+            if not search_term:
+                return None
+
+        status = self.status_var.get()
+
+        untagged = []
+        if hasattr(self, "chk_untagged_kws") and self.chk_untagged_kws.get():
+            untagged.append("Keywords")
+        if hasattr(self, "chk_untagged_cats") and self.chk_untagged_cats.get():
+            untagged.append("Category")
+        if hasattr(self, "chk_untagged_desc") and self.chk_untagged_desc.get():
+            untagged.append("Description")
+
+        return (scope, ss_id, col_id, search_term, status, tuple(untagged))
+
+    def _invalidate_count_cache_for_current_selection(self):
+        """Drop any cached count for the currently selected scope/selection.
+
+        This is called after a user-initiated selection change so the next
+        recount fetches a fresh value instead of reusing a stale cache entry
+        from a previous selection in the same scope.
+        """
+        key = self._current_cache_key()
+        if key is None:
+            return
+        # Remove every cache entry that shares the current scope prefix.
+        prefix = key[0]
+        for k in list(self._count_cache.keys()):
+            if isinstance(k, tuple) and len(k) >= 2 and k[0] == prefix:
+                self._count_cache.pop(k, None)
 
     def _get_selected_process_count(self, slider_value):
         """Return how many records will actually be processed for the slider value."""
@@ -1080,8 +1245,8 @@ class Step1Datasource(ctk.CTkFrame):
                 if tab == "Saved Searches":
                     scope = "saved_search"
                     ss_name = self.ss_var.get()
-                    ss_id = getattr(self, "_ss_map", {}).get(ss_name)
-                    if not ss_id:
+                    ss_ids = getattr(self, "_ss_map", {}).get(ss_name)
+                    if not ss_ids:
                         self.after(
                             0,
                             lambda: self.lbl_total_count.configure(
@@ -1089,6 +1254,7 @@ class Step1Datasource(ctk.CTkFrame):
                             ),
                         )
                         return
+                    ss_id = ss_ids[0] if isinstance(ss_ids, list) else ss_ids
                 elif tab == "Shared Collections":
                     scope = "collection"
                     col_name = self.col_var.get()
@@ -1127,21 +1293,41 @@ class Step1Datasource(ctk.CTkFrame):
                     f"[UI] Triggering filtered count: scope={scope}, term='{search_term if scope == 'search' else ''}', status={status}, untagged={untagged}"
                 )
 
-                # Efficient count
-                count = self.controller.session.daminion_client.get_filtered_item_count(
-                    scope=scope,
-                    saved_search_id=ss_id,
-                    collection_id=col_id,
-                    search_term=search_term if scope == "search" else None,
-                    untagged_fields=untagged,
-                    status_filter=status,
+                # Stable cache key for this exact scope+selection. A change to any
+                # component of the key (including a different saved search) is a new
+                # count; the same key means we may already have a fresh value.
+                cache_key = (
+                    scope,
+                    ss_id,
+                    col_id,
+                    search_term if scope == "search" else None,
+                    status,
+                    tuple(untagged),
                 )
 
-                logging.debug(f"[UI] Filtered count result: {count}")
+                cached = self._count_cache.get(cache_key)
+                if cached is not None:
+                    count = cached
+                    final_count = cached
+                    suffix = ""
+                    api_limited = False
+                    logging.debug(f"[UI] Filtered count cache hit for {cache_key!r}: {final_count}")
+                else:
+                    # Efficient count
+                    count = self.controller.session.daminion_client.get_filtered_item_count(
+                        scope=scope,
+                        saved_search_id=ss_id,
+                        collection_id=col_id,
+                        search_term=search_term if scope == "search" else None,
+                        untagged_fields=untagged,
+                        status_filter=status,
+                    )
 
-                suffix = ""
-                final_count = count
-                api_limited = False
+                    logging.debug(f"[UI] Filtered count result: {count}")
+
+                    final_count = count
+                    suffix = ""
+                    api_limited = False
 
                 # Detect if this scope uses text-based filters (API limited to ~500 items)
                 uses_text_filters = (scope in ("all", "search")) and untagged
@@ -1178,6 +1364,10 @@ class Step1Datasource(ctk.CTkFrame):
                     logging.info(
                         "[COUNT DEBUG] Detected API limitation (count=200 for text filter). Showing 500* as max fetchable."
                     )
+
+                # Persist the result for this exact scope/selection so a later
+                # switch back to it can reuse the value without another API call.
+                self._count_cache[cache_key] = final_count
 
                 # Update UI and Toggle Visibility
                 def _update_ui():
