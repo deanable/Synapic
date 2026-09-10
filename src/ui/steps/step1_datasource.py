@@ -507,21 +507,25 @@ class Step1Datasource(ctk.CTkFrame):
         if tab == "Saved Searches":
             scope = "saved_search"
             ss_name = self.ss_var.get()
-            ss_ids = getattr(self, "_ss_map", {}).get(ss_name)
-            if not ss_ids:
+            ss_id = self._resolve_saved_search_id(ss_name)
+            if ss_id is None:
                 raise ValueError("No saved search selected")
-            ss_id = ss_ids[0] if isinstance(ss_ids, list) else ss_ids
         elif tab == "Shared Collections":
             scope = "collection"
             col_name = self.col_var.get()
             col_id = getattr(self, "_col_map", {}).get(col_name)
-            if not col_id:
+            if col_id is None:
                 raise ValueError("No collection selected")
         elif tab == "Keyword Search":
             scope = "search"
             search_term = self.search_entry.get()
             if not search_term:
                 raise ValueError("No search term entered")
+        else:
+            scope = "all"
+            ss_id = None
+            col_id = None
+            search_term = None
 
         status = self.status_var.get()
         untagged = []
@@ -588,8 +592,8 @@ class Step1Datasource(ctk.CTkFrame):
                 if tab == "Saved Searches":
                     scope = "saved_search"
                     ss_name = self.ss_var.get()
-                    ss_id = getattr(self, "_ss_map", {}).get(ss_name)
-                    if not ss_id:
+                    ss_id = self._resolve_saved_search_id(ss_name)
+                    if ss_id is None:
                         raise ValueError("No saved search selected")
                 elif tab == "Shared Collections":
                     scope = "collection"
@@ -614,7 +618,7 @@ class Step1Datasource(ctk.CTkFrame):
                     untagged.append("Description")
 
                 self.logger.info(
-                    f"Fetching items with filters: scope={scope}, status={status}, untagged={untagged}"
+                    f"Fetching items with filters: scope={scope}, status={status}, untagged={untagged}, saved_search_id={ss_id}"
                 )
 
                 process_limit = self.controller.session.datasource.max_items
@@ -1131,6 +1135,19 @@ class Step1Datasource(ctk.CTkFrame):
             f"[LIMIT DEBUG] Quick action slider at {slider_value * 100:.0f}% of {total_count} -> max_items={ds.max_items}"
         )
 
+    def _resolve_saved_search_id(self, ss_name: str) -> Optional[int]:
+        """Resolve a saved-search display name to its first id.
+
+        ``_ss_map`` sometimes stores a single id and sometimes a list of ids
+        (older sessions vs newer API shape). In both cases we only ever use the
+        first id for filtered counts and fetches, so normalize here rather than
+        in every consumer.
+        """
+        ss_ids = getattr(self, "_ss_map", {}).get(ss_name)
+        if not ss_ids:
+            return None
+        return ss_ids[0] if isinstance(ss_ids, list) else ss_ids
+
     def _current_cache_key(self):
         """Return the cache key for the currently active scope/selection/filters.
 
@@ -1151,10 +1168,9 @@ class Step1Datasource(ctk.CTkFrame):
         if tab == "Saved Searches":
             scope = "saved_search"
             ss_name = self.ss_var.get()
-            ss_ids = getattr(self, "_ss_map", {}).get(ss_name)
-            if not ss_ids:
+            ss_id = self._resolve_saved_search_id(ss_name)
+            if ss_id is None:
                 return None
-            ss_id = ss_ids[0] if isinstance(ss_ids, list) else ss_ids
         elif tab == "Shared Collections":
             scope = "collection"
             col_name = self.col_var.get()
@@ -1245,8 +1261,8 @@ class Step1Datasource(ctk.CTkFrame):
                 if tab == "Saved Searches":
                     scope = "saved_search"
                     ss_name = self.ss_var.get()
-                    ss_ids = getattr(self, "_ss_map", {}).get(ss_name)
-                    if not ss_ids:
+                    ss_id = self._resolve_saved_search_id(ss_name)
+                    if ss_id is None:
                         self.after(
                             0,
                             lambda: self.lbl_total_count.configure(
@@ -1254,7 +1270,6 @@ class Step1Datasource(ctk.CTkFrame):
                             ),
                         )
                         return
-                    ss_id = ss_ids[0] if isinstance(ss_ids, list) else ss_ids
                 elif tab == "Shared Collections":
                     scope = "collection"
                     col_name = self.col_var.get()
@@ -1449,9 +1464,10 @@ class Step1Datasource(ctk.CTkFrame):
             elif tab == "Saved Searches":
                 ds.daminion_scope = "saved_search"
                 ds.daminion_saved_search = self.ss_var.get()
-                ds.daminion_saved_search_id = getattr(self, "_ss_map", {}).get(
-                    ds.daminion_saved_search
-                )
+                ss_id = self._resolve_saved_search_id(ds.daminion_saved_search)
+                if ss_id is None:
+                    raise ValueError("No saved search selected")
+                ds.daminion_saved_search_id = ss_id
             elif tab == "Shared Collections":
                 ds.daminion_scope = "collection"
                 ds.daminion_catalog_id = self.col_var.get()  # This is the display name

@@ -93,6 +93,7 @@ class TestableStep1(Step1Datasource):
             "_invalidate_count_cache_for_current_selection",
             "_schedule_count_if_needed",
             "_set_dropdown_value",
+            "_resolve_saved_search_id",
         ):
             if hasattr(Step1Datasource, _name):
                 setattr(self, _name, getattr(Step1Datasource, _name).__get__(self, TestableStep1))
@@ -241,6 +242,17 @@ class TestStep1SavedSearchCount:
         # Pretend the controller's datasource is connected so the count path
         # does not bail out early.
         step1.controller.session.daminion_client.authenticated = True
+        # next_step reads source_var to decide local vs daminion.
+        step1.source_var = MagicMock()
+        step1.source_var.get.return_value = "daminion"
+        step1.resize_scale_var = MagicMock()
+        step1.resize_scale_var.get.return_value = "100"
+        step1.use_thumbnail_override_var = MagicMock()
+        step1.use_thumbnail_override_var.get.return_value = False
+        step1.chk_recursive = MagicMock()
+        step1.chk_recursive.get.return_value = True
+        step1.path_entry = MagicMock()
+        step1.path_entry.get.return_value = "C:\\fake"
         return step1
 
     def test_switching_saved_search_queries_each_selection(self, mock_controller):
@@ -320,3 +332,73 @@ class TestStep1SavedSearchCount:
         step1.ss_var.get.return_value = "Alpha"
         step1._on_ss_selection_changed()
         assert mock_controller.session.daminion_client.get_filtered_item_count.call_count == 2, mock_controller.session.daminion_client.get_filtered_item_count.call_count
+
+    def test_open_dedup_step_uses_resolved_saved_search_id(self, mock_controller):
+        """Fetching items for dedup must pass the saved-search id, not the catalog.
+
+        If the saved-search id is missing/None, get_items_filtered falls back to
+        a broad catalog scan. This test asserts the load path resolves the first
+        id from ``_ss_map`` and hands it to the API.
+        """
+        mock_controller.session.daminion_client.get_items_filtered.return_value = [{"id": 7}]
+        step1 = self._make_step1(mock_controller, {"Alpha": [11], "Beta": [22]})
+        step1.tabs.get.return_value = "Saved Searches"
+        step1.ss_var.get.return_value = "Beta"
+
+        step1._open_dedup_step()
+
+        call_kwargs = mock_controller.session.daminion_client.get_items_filtered.call_args.kwargs
+        assert call_kwargs.get("saved_search_id") == 22, call_kwargs
+        assert call_kwargs.get("scope") == "saved_search"
+
+    def test_next_step_persists_resolved_saved_search_id(self, mock_controller):
+        """Committing the datasource must store a numeric saved-search id.
+
+        ``next_step`` is the source of truth for what downstream steps read from
+        ``session.datasource.daminion_saved_search_id``. If that field is a list
+        or missing, later fetches can silently broaden to the catalog.
+        """
+        step1 = self._make_step1(mock_controller, {"Alpha": [11], "Beta": [22]})
+        step1.tabs.get.return_value = "Saved Searches"
+        step1.ss_var.get.return_value = "Beta"
+        ds = mock_controller.session.datasource
+        ds.daminion_untagged_keywords = False
+        ds.daminion_untagged_categories = False
+        ds.daminion_untagged_description = False
+        ds.resize_scale = 100
+        ds.use_thumbnail_override = False
+        ds.max_items = 0
+        mock_controller.session.validate_workflow_state.return_value = (True, "")
+
+        step1.next_step()
+
+        assert ds.daminion_scope == "saved_search"
+        assert ds.daminion_saved_search == "Beta"
+        assert ds.daminion_saved_search_id == 22, ds.daminion_saved_search_id
+
+    def test_next_step_raises_when_no_saved_search_selected(self, mock_controller):
+        """Committing with no selected saved search must error out.
+
+        This keeps the behavior consistent with ``_get_current_scope_filters``
+        and the count path: if the dropdown says "Select a saved search..." (or
+        it is otherwise missing from ``_ss_map``), the UI must not proceed with a
+        falsy saved-search id.
+        """
+        step1 = self._make_step1(mock_controller, {"Alpha": [11]})
+        step1.tabs.get.return_value = "Saved Searches"
+        step1.ss_var.get.return_value = "Not present"
+        mock_controller.session.validate_workflow_state.return_value = (True, "")
+
+        with pytest.raises(ValueError, match="No saved search selected"):
+            step1.next_step()
+
+
+class TestStep1SavedSearchLoad:
+    """Tests covering item loading from a saved search.
+
+    The prior bug was that switching a saved search in the UI could report the
+    correct count but then fetch the entire catalog when loading items for
+    dedup/upscale/next-step. These tests assert that the load paths pass the
+    resolved saved-search id (not a list, not None) into
+    ``get_items_filtered``.
+    """
