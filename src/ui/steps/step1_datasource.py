@@ -25,6 +25,7 @@ Author: Synapic Project
 import customtkinter as ctk
 import logging
 from collections import defaultdict
+from typing import Optional
 from tkinter import messagebox
 from src.utils.background_worker import BackgroundWorker
 
