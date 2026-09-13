@@ -28,9 +28,6 @@ timm>=1.0.24
 
 # Vision-Language Models
 qwen-vl-utils>=0.0.14
-groq>=0.11.0
-ollama>=0.4.0
-cerebras_cloud_sdk>=1.30.0
 
 # Vector Embedding & Semantic Search
 sentence-transformers>=2.7.0

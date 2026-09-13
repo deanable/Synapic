@@ -46,96 +46,29 @@ class TestMemoryCleanup(unittest.TestCase):
         mock_gc_collect.assert_called()
 
     @patch('src.core.processing.gc.collect')
-    def test_api_client_created_once_and_closed(self, mock_gc_collect):
-        """API client is created once in _run_job and closed after job completes."""
-        session = Session()
-        session.engine.provider = "nvidia"
-        session.engine.nvidia_api_key = "test-key-123"
-
-        log_cb = MagicMock()
-        prog_cb = MagicMock()
-
-        manager = ProcessingManager(session, log_cb, prog_cb)
-
-        mock_client = MagicMock()
-        mock_client.is_available.return_value = True
-
-        with patch('src.core.processing.NvidiaClient', return_value=mock_client) as MockClass, \
-             patch.object(ProcessingManager, '_fetch_items', return_value=[]):
-            manager._run_job()
-
-        # Client created exactly once (not per item)
-        MockClass.assert_called_once_with(api_key="test-key-123")
-        # Client closed at end of job
-        mock_client.close.assert_called_once()
-        # API client reference cleared
-        self.assertIsNone(manager._api_client)
-        # gc.collect called
-        mock_gc_collect.assert_called()
-
-    @patch('src.core.processing.gc.collect')
     def test_periodic_gc_collect_per_item(self, mock_gc_collect):
         """gc.collect is called periodically during item processing."""
         session = Session()
-        session.engine.provider = "nvidia"
-        session.engine.nvidia_api_key = "test-key-123"
+        session.engine.provider = "local"
+        session.engine.device = "cpu"
 
         log_cb = MagicMock()
         prog_cb = MagicMock()
 
         manager = ProcessingManager(session, log_cb, prog_cb)
-
-        mock_client = MagicMock()
-        mock_client.is_available.return_value = True
-        mock_client.chat_with_image.return_value = '{"description":"test","category":"Test","keywords":["a"]}'
 
         # Create 6 fake items (triggers gc.collect at items 3 and 6 with new interval)
         from pathlib import Path
         fake_items = [Path(f"fake_{i}.jpg") for i in range(6)]
 
-        with patch('src.core.processing.NvidiaClient', return_value=mock_client), \
-             patch.object(ProcessingManager, '_fetch_items', return_value=fake_items), \
-             patch('src.core.processing.image_processing') as mock_ip, \
-             patch('src.core.processing.Image'):
-            mock_ip.extract_tags_from_result.return_value = ("Test", ["a"], "test desc")
-            mock_ip.write_metadata.return_value = True
+        with patch.object(ProcessingManager, '_fetch_items', return_value=fake_items), \
+             patch.object(ProcessingManager, '_init_local_model'), \
+             patch.object(ProcessingManager, '_process_single_item'):
             manager._run_job()
 
         # gc.collect should have been called multiple times:
         # at items 3 and 6 (every 3 items), plus once at end of job
         self.assertGreaterEqual(mock_gc_collect.call_count, 3)
-
-    @patch('src.core.processing.gc.collect')
-    def test_groq_client_reused_across_items(self, mock_gc_collect):
-        """Groq client is created once and reused, not per-item."""
-        session = Session()
-        session.engine.provider = "groq_package"
-        session.engine.groq_api_keys = "test-key-123"
-
-        log_cb = MagicMock()
-        prog_cb = MagicMock()
-
-        manager = ProcessingManager(session, log_cb, prog_cb)
-
-        mock_client = MagicMock()
-        mock_client.is_available.return_value = True
-        mock_client.chat_with_image.return_value = '{"description":"test","category":"Test","keywords":["a"]}'
-
-        from pathlib import Path
-        fake_items = [Path(f"fake_{i}.jpg") for i in range(3)]
-
-        with patch('src.core.processing.GroqPackageClient', return_value=mock_client) as MockClass, \
-             patch.object(ProcessingManager, '_fetch_items', return_value=fake_items), \
-             patch('src.core.processing.image_processing') as mock_ip, \
-             patch('src.core.processing.Image'):
-            mock_ip.extract_tags_from_result.return_value = ("Test", ["a"], "test desc")
-            mock_ip.write_metadata.return_value = True
-            manager._run_job()
-
-        # Client created once, not 3 times
-        MockClass.assert_called_once()
-        # Client closed at end
-        mock_client.close.assert_called_once()
 
     def test_session_results_bounded(self):
         """Session results list is bounded to prevent unbounded growth."""

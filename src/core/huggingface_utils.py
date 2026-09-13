@@ -41,10 +41,8 @@ Author: Synapic Project
 """
 
 import logging
-import time
 import os
 import shutil
-import base64
 import difflib
 from contextlib import nullcontext
 from pathlib import Path
@@ -54,11 +52,9 @@ from huggingface_hub import (
     hf_hub_download,
     snapshot_download,
     HfApi,
-    InferenceClient,
 )
 from huggingface_hub import file_download as hf_file_download
 from huggingface_hub.constants import HUGGINGFACE_HUB_CACHE
-import requests
 from requests.exceptions import HTTPError
 from transformers import (
     pipeline,
@@ -80,11 +76,6 @@ from typing import Optional, Dict, Any, List, Tuple
 # On Windows without Developer Mode, symlink creation fails with WinError 1314
 _USE_SYMLINKS = "auto" if os.name != "nt" else False
 _LOCAL_INFERENCE_COMPAT_CACHE: Dict[Tuple[str, str], Optional[str]] = {}
-
-# Persistent session so inference API calls reuse TCP/TLS connections
-# instead of opening a new one per image. Shared across parallel worker
-# threads (urllib3 connection pools are thread-safe).
-_HTTP_SESSION = requests.Session()
 
 
 def get_device_info() -> Dict[str, Any]:
@@ -1371,274 +1362,6 @@ def load_model(
         logging.exception(f"Failed to load model (sync): {model_id}")
         if progress_queue:
             progress_queue.put(("error", f"Failed to load model: {e}"))
-        raise
-
-
-# -------------------------------------------------------------------------
-# API Inference Support
-# -------------------------------------------------------------------------
-
-
-class RateLimitError(Exception):
-    """Raised when Hugging Face API rate limit is exceeded."""
-
-    def __init__(self, retry_after=None):
-        self.retry_after = retry_after
-        msg = "Hugging Face API rate limit exceeded."
-        if retry_after:
-            msg += f" Retry after {retry_after} seconds."
-        msg += " Consider downloading the model for unlimited local inference."
-        super().__init__(msg)
-
-
-def rate_limit_handler(max_retries=3, initial_delay=1.0):
-    """
-    Decorator to handle rate limiting and network errors for API calls.
-    """
-
-    def decorator(func):
-        def wrapper(*args, **kwargs):
-            retries = 0
-            delay = initial_delay
-
-            while True:
-                try:
-                    return func(*args, **kwargs)
-                except Exception as e:
-                    # Check for HTTP 429 (Rate Limit)
-                    is_rate_limit = False
-                    if hasattr(e, "response") and hasattr(e.response, "status_code"):
-                        if e.response.status_code == 429:
-                            is_rate_limit = True
-                    # Also check for message content if exception type is generic
-                    if "429" in str(e) or "Rate limit" in str(e):
-                        is_rate_limit = True
-
-                    if is_rate_limit:
-                        if retries >= max_retries:
-                            logging.error(f"Max retries exceeded for API call: {e}")
-                            raise
-
-                        # Check for retry-after header
-                        wait_time = delay
-                        if hasattr(e, "response") and hasattr(e.response, "headers"):
-                            if "retry-after" in e.response.headers:
-                                try:
-                                    wait_time = (
-                                        float(e.response.headers["retry-after"]) + 1.0
-                                    )  # Add buffer
-                                except (ValueError, TypeError):
-                                    pass
-
-                        logging.warning(
-                            f"⚠️ Rate limited by Hugging Face API. "
-                            f"Waiting {wait_time:.0f}s before retry {retries + 1}/{max_retries}... "
-                            f"Consider downloading the model for unlimited local inference."
-                        )
-                        time.sleep(wait_time)
-                        retries += 1
-                        delay *= 2  # Exponential backoff for subsequent defaults
-
-                    elif (
-                        hasattr(e, "response")
-                        and hasattr(e.response, "status_code")
-                        and e.response.status_code >= 500
-                    ):
-                        # Server error, retry
-                        if retries >= max_retries:
-                            logging.error(f"Max retries exceeded for server error: {e}")
-                            raise
-                        logging.warning(
-                            f"Server error {e.response.status_code}. Retrying {retries + 1}/{max_retries}..."
-                        )
-                        time.sleep(delay)
-                        retries += 1
-                        delay *= 2
-
-                    else:
-                        # Other errors (Auth, BadRequest) - do not retry
-                        raise
-
-        return wrapper
-
-    return decorator
-
-
-@rate_limit_handler(max_retries=3)
-def run_inference_api(model_id, image_path, task, token, parameters=None):
-    """
-    Runs inference using the Hugging Face Inference API.
-
-    Args:
-        model_id: The model ID on HF Hub.
-        image_path: Path to local image file.
-        task: The task type (e.g. 'image-classification').
-        token: HF API Token.
-        parameters: Optional parameters dict.
-
-    Returns:
-        The raw JSON response from the API.
-    """
-    from src.utils.logger import log_api_request, log_api_response
-
-    logger = logging.getLogger(__name__)
-
-    logger.info(
-        f"[HuggingFace API] Starting inference - Model: {model_id}, Task: {task}"
-    )
-    start_time = time.time()
-
-    # Note: InferenceClient is only needed for zero-shot (other paths use direct HTTP).
-    # We create it lazily below to avoid allocating connection pools unnecessarily.
-    client = None
-
-    # Map internal task names to API tasks if needed, though they usually match.
-    # We mainly need to handle the input type.
-
-    # For image tasks, we pass the file.
-    try:
-        # Check image validity
-        if not Path(image_path).exists():
-            raise FileNotFoundError(f"Image not found: {image_path}")
-
-        # InferenceClient.predict() or specific task methods can be used.
-        # .image_classification() is specific.
-        # .image_to_text() is specific.
-
-        logger.debug(f"Image path: {image_path}")
-        logger.debug(f"Parameters: {parameters}")
-
-        if task == config.MODEL_TASK_IMAGE_CLASSIFICATION:
-            try:
-                with open(image_path, "rb") as img_f:
-                    b64_image = base64.b64encode(img_f.read()).decode("utf-8")
-
-                payload = {"inputs": b64_image}
-                # Free the standalone base64 copy now that it's in the payload
-                del b64_image
-
-                # Using the router endpoint
-                api_url = (
-                    f"https://router.huggingface.co/hf-inference/models/{model_id}"
-                )
-                headers = {"Authorization": f"Bearer {token}"}
-
-                log_api_request(logger, "POST", api_url, headers=headers, data=payload)
-
-                response = _HTTP_SESSION.post(api_url, headers=headers, json=payload)
-                del payload  # Free the payload immediately after sending
-                elapsed = time.time() - start_time
-
-                log_api_response(logger, response.status_code, elapsed_time=elapsed)
-                response.raise_for_status()
-
-                result = response.json()
-                response.close()  # Release socket buffers
-                logger.info(
-                    f"[HuggingFace API] Inference successful - Duration: {elapsed:.3f}s"
-                )
-                return result
-
-            except requests.exceptions.HTTPError as e:
-                if e.response.status_code in [404, 410]:
-                    raise ValueError(
-                        f"Model {model_id} is not available on the free Hugging Face Inference API. Status: {e.response.status_code}"
-                    )
-                raise e
-
-        elif task == config.MODEL_TASK_ZERO_SHOT:
-            # Zero shot requires candidate labels in parameters
-            if not parameters or "candidate_labels" not in parameters:
-                raise ValueError("candidate_labels required for zero-shot api")
-
-            try:
-                # Lazily create InferenceClient only when needed
-                client = InferenceClient(token=token)
-                return client.zero_shot_image_classification(
-                    image_path,
-                    model=model_id,
-                    candidate_labels=parameters["candidate_labels"],
-                )
-            except Exception as e:
-                # Fallback for StopIteration or other client issues
-                logging.warning(
-                    f"Native zero-shot client failed ({type(e).__name__}), falling back to raw JSON API..."
-                )
-
-                with open(image_path, "rb") as img_f:
-                    b64_image = base64.b64encode(img_f.read()).decode("utf-8")
-
-                payload = {
-                    "inputs": b64_image,
-                    "parameters": {"candidate_labels": parameters["candidate_labels"]},
-                }
-                # Free the standalone base64 copy
-                del b64_image
-
-                # Direct API call to bypass client library issues and deprecated endpoints
-                # Using the new router endpoint
-                api_url = (
-                    f"https://router.huggingface.co/hf-inference/models/{model_id}"
-                )
-                headers = {"Authorization": f"Bearer {token}"}
-
-                response = _HTTP_SESSION.post(api_url, headers=headers, json=payload)
-                del payload  # Free immediately after sending
-                try:
-                    response.raise_for_status()
-                except requests.exceptions.HTTPError as e:
-                    if response.status_code in [404, 410]:
-                        raise ValueError(
-                            f"Model {model_id} is not available on the free Hugging Face Inference API (Status {response.status_code}). Please use 'Local' mode or try a different model."
-                        )
-                    raise e
-
-                result = response.json()
-                response.close()  # Release socket buffers
-                return result
-
-        elif task == config.MODEL_TASK_IMAGE_TO_TEXT:
-            try:
-                with open(image_path, "rb") as img_f:
-                    b64_image = base64.b64encode(img_f.read()).decode("utf-8")
-
-                gen_kwargs = parameters.get("generate_kwargs", {}) or {}
-
-                payload = {"inputs": b64_image, "parameters": gen_kwargs}
-                # Free the standalone base64 copy
-                del b64_image
-
-                # Using the router endpoint
-                api_url = (
-                    f"https://router.huggingface.co/hf-inference/models/{model_id}"
-                )
-                headers = {"Authorization": f"Bearer {token}"}
-
-                response = _HTTP_SESSION.post(api_url, headers=headers, json=payload)
-                del payload  # Free immediately after sending
-                response.raise_for_status()
-                result = response.json()
-                response.close()  # Release socket buffers
-                return result
-
-            except requests.exceptions.HTTPError as e:
-                if e.response.status_code in [404, 410]:
-                    raise ValueError(
-                        f"Model {model_id} is not available on the free Hugging Face Inference API. Status: {e.response.status_code}"
-                    )
-                raise e
-
-        else:
-            # Fallback to generic — lazily create client
-            client = InferenceClient(token=token)
-            return client.post(json={"inputs": image_path}, model=model_id, task=task)
-
-    except Exception as e:
-        elapsed = time.time() - start_time
-        logger.error(
-            f"[HuggingFace API] Inference failed after {elapsed:.3f}s: {type(e).__name__}: {str(e)}"
-        )
-        logger.exception("Full traceback:")
         raise
 
 

@@ -19,7 +19,7 @@ def test_default_datasource_and_engine_configs():
     # Defaults as defined in the dataclasses
     assert ds.type == "local"
     assert isinstance(ds.local_path, str)
-    assert eng.provider in ("local", "huggingface", "openrouter")
+    assert eng.provider == "local"
 
 
 def test_session_initializes_defaults():

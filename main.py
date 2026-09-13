@@ -2,9 +2,9 @@
 Synapic - AI-Powered Image Tagging Application
 ===============================================
 
-Main entry point for the Synapic application. This application uses AI models
-(local, Hugging Face, or OpenRouter) to automatically generate metadata tags
-for images, including categories, keywords, and descriptions.
+Main entry point for the Synapic application. This application uses locally
+run AI models (LFM - Local Foundation Models) to automatically generate
+metadata tags for images, including categories, keywords, and descriptions.
 
 The application can work with:
 - Local image folders

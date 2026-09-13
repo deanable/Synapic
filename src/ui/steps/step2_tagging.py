@@ -1,25 +1,23 @@
 """
-Step 2: Tagging Engine Configuration UI
-=======================================
+Step 2: Tagging Engine Configuration UI (LFM)
+==============================================
 
-This module defines the UI for selecting and configuring the AI engine used 
-for image processing. It supports a unified interface for three distinct 
-processing targets:
+This module defines the UI for configuring the LFM (Local Foundation Models)
+tagging engine. Synapic only runs image tagging with models downloaded to the
+local Hugging Face cache — there are no cloud provider selections.
 
-1. Local Inference: Uses on-device hardware (CPU/GPU) to run cached models.
-2. Hugging Face API: Serverless inference via the Hugging Face Hub (requires Internet).
-3. OpenRouter API: Access to multimodal models via a unified gateway (requires Internet).
+The UI keeps the existing global inference parameters (confidence threshold,
+device selection) and embeds the local-model workflow directly:
 
-The UI manages model discovery (searching the Hub), cache management (downloading 
-models for offline use), and global inference parameters like confidence 
-thresholds and device selection.
+- "+ Find & Download Models": browse the Hugging Face Hub and cache compatible
+  models for offline tagging.
+- Downloaded Models list: pick a cached model for local inference.
 
 Key Components:
 ---------------
-- Engine Cards: Visual selection of the processing provider.
-- Config Dialog: Modal interface for model selection and API key management.
-- Download Manager: Integrated downloader with real-time progress for local models.
-- Global Settings: Threshold sliders and device toggles (CPU vs. CUDA).
+- LFM Engine Section: embedded local-model list with Hub download manager.
+- Global Settings: confidence threshold slider and device toggle (CPU/CUDA).
+- Download Manager: integrated downloader with real-time progress.
 
 Author: Synapic Project
 """
@@ -32,27 +30,19 @@ from src.utils.background_worker import BackgroundWorker
 from src.utils.registry_config import load_ui_preferences, save_ui_preferences
 from src.core import config
 
-# Import provider tab classes
 from .provider_tab_local import create_local_tab
-from .provider_tab_hf import create_huggingface_tab
-from .provider_tab_or import create_openrouter_tab
-from .provider_tab_groq import create_groq_tab
-from .provider_tab_ollama import create_ollama_tab
-from .provider_tab_nvidia import create_nvidia_tab
-from .provider_tab_google_ai import create_google_ai_tab
-from .provider_tab_cerebras import create_cerebras_tab
 
 logger = logging.getLogger(__name__)
 
 
 class Step2Tagging(ctk.CTkFrame):
     """
-    UI component for the second step of the tagging wizard.
-    
-    This frame serves as the hub for AI configuration. It coordinates between
-    local model caching and remote API settings, ensuring the 'EngineConfig'
-    is fully populated before moving to the execution phase.
-    
+    UI component for the second step of the tagging wizard (LFM / local-only).
+
+    This frame coordinates local model selection and global inference settings,
+    ensuring the 'EngineConfig' is fully populated before moving to the
+    execution phase.
+
     Attributes:
         controller: The main App instance managing the wizard flow.
         session: Global application state and configuration.
@@ -60,91 +50,41 @@ class Step2Tagging(ctk.CTkFrame):
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
+        self.session = self.controller.session
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
-        
+
         # Main container
         self.container = ctk.CTkScrollableFrame(self)
         self.container.grid(row=0, column=0, padx=20, pady=20, sticky="nsew")
         self.container.grid_columnconfigure(0, weight=1)
 
         # Title
-        title = ctk.CTkLabel(self.container, text="Step 2: Tagging Engine", font=("Roboto", 24, "bold"))
-        title.grid(row=0, column=0, pady=(20, 30))
+        title = ctk.CTkLabel(self.container, text="Step 2: Tagging Engine (LFM)", font=("Roboto", 24, "bold"))
+        title.grid(row=0, column=0, pady=(20, 20))
 
-        # Engine Selection
-        self.engine_var = ctk.StringVar(value=self.controller.session.engine.provider or "huggingface")
-        
-        # Engine Cards (using Radio buttons for simplicity but styled)
-        self.cards_frame = ctk.CTkFrame(self.container, fg_color="transparent")
-        self.cards_frame.grid(row=1, column=0, pady=10, padx=20, sticky="ew")
-        for col in range(4):
-            self.cards_frame.grid_columnconfigure(col, weight=1)
-        
-        self.create_engine_card(self.cards_frame, "Local Inference", "local", 0)
-        self.create_engine_card(self.cards_frame, "Hugging Face", "huggingface", 1)
-        self.create_engine_card(self.cards_frame, "OpenRouter", "openrouter", 2)
-        self.create_engine_card(self.cards_frame, "Groq", "groq_package", 3)
-        self.create_engine_card(self.cards_frame, "Ollama", "ollama", 4)
-        self.create_engine_card(self.cards_frame, "Nvidia", "nvidia", 5)
-        self.create_engine_card(self.cards_frame, "Google AI", "google_ai", 6)
-        self.create_engine_card(self.cards_frame, "Cerebras", "cerebras", 7)
-
-        # Inline Config Container
-        self.session = self.controller.session
+        # LFM engine section — the local provider tab IS the engine config.
+        # Synapic tags images locally only: no provider radio groups.
         self._worker = BackgroundWorker(name="Step2Worker")
         self._load_registry_ui_preferences()
-        self.config_container = ctk.CTkFrame(self.container, fg_color="transparent")
-        self.config_container.grid(row=2, column=0, pady=5, sticky="ew")
-        self.config_container.grid_columnconfigure(0, weight=1)
+        self.local_tab = create_local_tab(
+            self.container, self.session, self._worker,
+            self._persist_image_filter_preference, self._filter_image_models
+        )
+        self.local_tab.grid(row=1, column=0, pady=5, sticky="ew")
 
-        # Create provider tabs using factory functions
-        self.provider_tabs = {}
-        self.provider_tabs["local"] = create_local_tab(
-            self.config_container, self.session, self._worker,
-            self._persist_image_filter_preference, self._filter_image_models
-        )
-        self.provider_tabs["huggingface"] = create_huggingface_tab(
-            self.config_container, self.session, self._worker,
-            self._persist_image_filter_preference, self._filter_image_models
-        )
-        self.provider_tabs["openrouter"] = create_openrouter_tab(
-            self.config_container, self.session, self._worker,
-            self._persist_image_filter_preference, self._filter_image_models
-        )
-        self.provider_tabs["groq_package"] = create_groq_tab(
-            self.config_container, self.session, self._worker,
-            self._persist_image_filter_preference, self._filter_image_models
-        )
-        self.provider_tabs["ollama"] = create_ollama_tab(
-            self.config_container, self.session, self._worker,
-            self._persist_image_filter_preference, self._filter_image_models
-        )
-        self.provider_tabs["nvidia"] = create_nvidia_tab(
-            self.config_container, self.session, self._worker,
-            self._persist_image_filter_preference, self._filter_image_models
-        )
-        self.provider_tabs["google_ai"] = create_google_ai_tab(
-            self.config_container, self.session, self._worker,
-            self._persist_image_filter_preference, self._filter_image_models
-        )
-        self.provider_tabs["cerebras"] = create_cerebras_tab(
-            self.config_container, self.session, self._worker,
-            self._persist_image_filter_preference, self._filter_image_models
-        )
-        
         # === Model Info Section ===
         model_info_frame = ctk.CTkFrame(self.container, fg_color="#2B2B2B", corner_radius=10)
-        model_info_frame.grid(row=3, column=0, pady=10, padx=40, sticky="ew")
+        model_info_frame.grid(row=2, column=0, pady=10, padx=40, sticky="ew")
         model_info_frame.grid_columnconfigure(1, weight=1)
-        
+
         ctk.CTkLabel(
             model_info_frame,
             text="Selected Model:",
             font=("Roboto", 12, "bold")
         ).grid(row=0, column=0, padx=15, pady=10, sticky="w")
-        
+
         self.model_info_label = ctk.CTkLabel(
             model_info_frame,
             text=self._get_model_display_text(),
@@ -154,28 +94,26 @@ class Step2Tagging(ctk.CTkFrame):
         )
         self.model_info_label.grid(row=0, column=1, padx=10, pady=10, sticky="w")
 
-
-        
         # === Global Settings Section ===
         settings_frame = ctk.CTkFrame(self.container, fg_color="#2B2B2B", corner_radius=10)
-        settings_frame.grid(row=4, column=0, pady=10, padx=40, sticky="ew")
-        
+        settings_frame.grid(row=3, column=0, pady=10, padx=40, sticky="ew")
+
         ctk.CTkLabel(
             settings_frame,
             text="Global Settings",
             font=("Roboto", 14, "bold")
         ).pack(pady=(15, 10))
-        
+
         # Device Toggle
         device_container = ctk.CTkFrame(settings_frame, fg_color="transparent")
         device_container.pack(fill="x", padx=20, pady=10)
-        
+
         ctk.CTkLabel(
             device_container,
             text="Inference Device:",
             font=("Roboto", 12)
         ).pack(side="left", padx=(0, 10))
-        
+
         self.device_var = ctk.StringVar(value=self.controller.session.engine.device)
         self.device_switch = ctk.CTkSegmentedButton(
             device_container,
@@ -185,17 +123,17 @@ class Step2Tagging(ctk.CTkFrame):
             width=140
         )
         self.device_switch.pack(side="left")
-        
+
         # Confidence Threshold
         threshold_label_frame = ctk.CTkFrame(settings_frame, fg_color="transparent")
         threshold_label_frame.pack(fill="x", padx=20, pady=(10, 5))
-        
+
         ctk.CTkLabel(
             threshold_label_frame,
             text="Confidence Threshold:",
             font=("Roboto", 12, "bold")
         ).pack(side="left", padx=(0, 5))
-        
+
         self.threshold_value_label = ctk.CTkLabel(
             threshold_label_frame,
             text=f"{self.controller.session.engine.confidence_threshold}%",
@@ -203,27 +141,25 @@ class Step2Tagging(ctk.CTkFrame):
             text_color="#2FA572"
         )
         self.threshold_value_label.pack(side="left", padx=5)
-        
+
         ctk.CTkLabel(
             threshold_label_frame,
             text="(Filters out low-probability matches)",
             font=("Roboto", 9),
             text_color="gray"
         ).pack(side="left", padx=10)
-        
+
         # Slider with precision level labels
         slider_container = ctk.CTkFrame(settings_frame, fg_color="transparent")
         slider_container.pack(fill="x", padx=20, pady=(0, 15))
-        
-        # Left label: Free
+
         ctk.CTkLabel(
             slider_container,
             text="Free",
             font=("Roboto", 10),
             text_color="gray"
         ).pack(side="left", padx=(0, 10))
-        
-        # Slider
+
         self.threshold_slider = ctk.CTkSlider(
             slider_container,
             from_=1,
@@ -233,34 +169,27 @@ class Step2Tagging(ctk.CTkFrame):
         )
         self.threshold_slider.set(self.controller.session.engine.confidence_threshold)
         self.threshold_slider.pack(side="left", fill="x", expand=True)
-        
-        # Right label: Strict
+
         ctk.CTkLabel(
             slider_container,
             text="Strict",
             font=("Roboto", 10),
             text_color="gray"
         ).pack(side="left", padx=(10, 0))
-        
+
         # Navigation Buttons
         nav_frame = ctk.CTkFrame(self.container, fg_color="transparent")
-        nav_frame.grid(row=5, column=0, pady=20, sticky="ew")
-        
+        nav_frame.grid(row=4, column=0, pady=20, sticky="ew")
+
         ctk.CTkButton(nav_frame, text="Previous", command=lambda: self.controller.show_step("Step1Datasource"), width=150, fg_color="gray").pack(side="left", padx=20)
         ctk.CTkButton(nav_frame, text="Next Step", command=self.next_step, width=200, height=40).pack(side="right", padx=20)
-
-        # Traces for color coding
-        self.engine_var.trace_add("write", lambda *args: self._on_engine_change())
-        self._on_engine_change()
-
-        # (Auto-load of Groq models is handled in the ConfigDialog for the Groq tab)
 
     def _get_model_display_text(self):
         """Generate display text for selected model with capability info."""
         session = self.controller.session
         model_id = session.engine.model_id or "None"
         task = session.engine.task or "unknown"
-        
+
         # Map task to capability description
         capability_map = {
             "image-classification": "Keywords",
@@ -268,12 +197,12 @@ class Step2Tagging(ctk.CTkFrame):
             "image-to-text": "Description",
             "image-text-to-text": "Multi-modal (Keywords, Categories, Description)"
         }
-        
+
         capability = capability_map.get(task, "Unknown capability")
-        
+
         if model_id == "None" or not model_id:
             return "No model selected"
-        
+
         return f"{model_id} • {capability}"
 
     def on_threshold_change(self, value):
@@ -287,43 +216,17 @@ class Step2Tagging(ctk.CTkFrame):
         self.controller.session.engine.device = value
         logger.debug(f"Device changed to: {value}")
 
-    def _on_engine_change(self):
-        engine = self.engine_var.get()
-        # Hide all provider tabs
-        for tab in self.provider_tabs.values():
-            tab.grid_forget()
-
-        # Show the correct tab
-        if engine in self.provider_tabs:
-            self.provider_tabs[engine].grid(row=0, column=0, sticky="nsew")
-            # Refresh the tab when it becomes visible
-            self.provider_tabs[engine].refresh()
-
-    def _apply_config(self):
-        self.update_model_info()
-
-    def create_engine_card(self, parent, text, value, col):
-        row = col // 4
-        column = col % 4
-        card = ctk.CTkRadioButton(parent, text=text, variable=self.engine_var, value=value, font=("Roboto", 16))
-        card.grid(row=row, column=column, padx=20, pady=12, sticky="w")
-        
-            
     def update_model_info(self):
         """Update the model info label after configuration changes."""
         self.model_info_label.configure(text=self._get_model_display_text())
-        
+
     def next_step(self):
-        # Flush the active tab's UI state into the session before validation,
+        # Flush the local tab's UI state into the session before validation,
         # so the session reflects what the user just configured.
-        active_engine = self.engine_var.get()
-        self.controller.session.engine.provider = active_engine
-        active_tab = self.provider_tabs.get(active_engine)
-        if active_tab and hasattr(active_tab, "save_to_session"):
-            try:
-                active_tab.save_to_session()
-            except Exception as e:
-                logger.warning(f"Could not flush tab state to session: {e}")
+        try:
+            self.local_tab.save_to_session()
+        except Exception as e:
+            logger.warning(f"Could not flush tab state to session: {e}")
 
         # Validate before proceeding
         is_valid, error_msg = self.controller.session.validate_workflow_state("Step3Process")
@@ -337,20 +240,18 @@ class Step2Tagging(ctk.CTkFrame):
     def refresh_stats(self):
         """
         Synchronize the UI elements with the current Session state.
-        
+
         Called by the App coordinator whenever the user navigates to this step
         to ensure all inputs accurately reflect the persisted configuration.
         """
-        # Sync engine provider radio button with session
-        self.engine_var.set(self.controller.session.engine.provider or "huggingface")
-        self._on_engine_change()
+        # Sync the local tab (model, probability controls) with the session
+        if hasattr(self.local_tab, 'refresh'):
+            self.local_tab.refresh()
         self.update_model_info()
         # Update device and threshold from session
         self.device_var.set(self.controller.session.engine.device)
         self.threshold_slider.set(self.controller.session.engine.confidence_threshold)
         self.threshold_value_label.configure(text=f"{self.controller.session.engine.confidence_threshold}%")
-
-
 
     def _schedule_ui_update(self, callback):
         """Schedule a callback on the UI thread only while the dialog exists.
@@ -381,11 +282,11 @@ class Step2Tagging(ctk.CTkFrame):
         save_ui_preferences({attr_name: bool(value)})
 
     def _model_supports_image(self, model) -> bool:
-        """Heuristic check for image-capable models across providers."""
+        """Heuristic check for image-capable models."""
         markers = (
             "vision", "image", "visual", "multimodal", "multi-modal",
             "image-to-text", "image-text-to-text", "visual-question-answering",
-            "llava", "gemini", "phi-3-vision", "vl", "scout", "maverick"
+            "llava", "phi-3-vision", "vl"
         )
 
         texts = []
@@ -413,1693 +314,16 @@ class Step2Tagging(ctk.CTkFrame):
             return model_list
         return [model for model in model_list if self._model_supports_image(model)]
 
-    def _display_groq_models(self, models, update_cache=True):
-        # Lazy create a Groq models panel on the Groq tab if not exists (though init_groq_tab creates it now)
-        if not self.winfo_exists() or not hasattr(self, "_groq_models_list"):
-             return 
-
-        if update_cache:
-            self._groq_models_cache = list(models or [])
-        raw_models = list(self._groq_models_cache)
-        models = self._filter_image_models(raw_models, self.groq_image_only_var.get())
-
-        for w in self._groq_models_list.winfo_children():
-            w.destroy()
-            
-        # Header
-        header_text = f"{'Model ID':<40} | {'Capability':^15} | {'Cost':>15}"
-        ctk.CTkLabel(
-            self._groq_models_list, 
-            text=header_text, 
-            font=("Courier New", 12, "bold"),
-            text_color="gray",
-            anchor="w"
-        ).pack(fill="x", pady=(5, 10), padx=5)
-
-        if not raw_models:
-            ctk.CTkLabel(self._groq_models_list, text="No Groq models found (check API key?).", text_color="gray").pack()
-            return
-        if not models:
-            ctk.CTkLabel(
-                self._groq_models_list,
-                text="No image-capable Groq models matched the current filter.",
-                text_color="gray"
-            ).pack()
-            return
-
-        for m in models:
-            mid = m.get('id') or m.get('model_id') or ''
-            cap = m.get('capability') or m.get('task') or 'Groq'
-            cost = m.get('token_cost') or m.get('token_cost_per_inference') or m.get('cost')
-            cost_text = f"{cost} tokens" if cost is not None else "Unknown"
-            
-            display_text = f"{mid:<40} | {cap:^15} | {cost_text:>15}"
-            
-            btn = ctk.CTkButton(
-                self._groq_models_list, 
-                text=display_text, 
-                font=("Courier New", 12),
-                fg_color="transparent",
-                border_width=1,
-                anchor="w", 
-                width=0,
-                command=lambda m_id=mid: self._select_groq_model(m_id)
-            )
-            btn.pack(fill="x", pady=2)
-
-    def _select_groq_model(self, model_id):
-        self.groq_model.delete(0, "end")
-        self.groq_model.insert(0, model_id)
-
-    def init_groq_tab(self):
-        # Refined Groq tab with multi-key API Key support and Model Selection
-        self.tab_groq.grid_columnconfigure(0, weight=1)
-        self.tab_groq.grid_rowconfigure(2, weight=1) # List area grows
-
-        # API Keys section
-        key_frame = ctk.CTkFrame(self.tab_groq, fg_color="transparent")
-        key_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=5)
-        key_frame.grid_columnconfigure(0, weight=1)
-
-        # Header row with label, count badge, and refresh button
-        header_row = ctk.CTkFrame(key_frame, fg_color="transparent")
-        header_row.pack(fill="x")
-
-        ctk.CTkLabel(header_row, text="API Keys (one per line):").pack(side="left")
-
-        self.groq_key_count_label = ctk.CTkLabel(
-            header_row, text="0 keys", font=("Roboto", 10),
-            text_color="gray"
-        )
-        self.groq_key_count_label.pack(side="left", padx=10)
-
-        ctk.CTkButton(
-            header_row, text="Refresh Models",
-            command=self._load_and_display_groq_models, width=120
-        ).pack(side="right")
-
-        # Multi-line textbox for API keys
-        existing_keys = self.session.engine.groq_api_keys or ""
-        self.groq_api_keys_textbox = ctk.CTkTextbox(
-            key_frame, height=70, font=("Courier New", 11),
-            wrap="none", fg_color="#1E1E1E", border_width=1,
-            border_color="#444"
-        )
-        self.groq_api_keys_textbox.pack(fill="x", pady=(5, 2))
-        if existing_keys:
-            self.groq_api_keys_textbox.insert("1.0", existing_keys)
-
-        # Helper hint
-        ctk.CTkLabel(
-            key_frame,
-            text="💡 Enter multiple Groq API keys (one per line) for automatic rotation when quota is exceeded.",
-            font=("Roboto", 9), text_color="#888", anchor="w", wraplength=600
-        ).pack(fill="x")
-
-        # Update key count on any change
-        self.groq_api_keys_textbox.bind("<KeyRelease>", lambda e: self._update_groq_key_count())
-        self._update_groq_key_count()
-
-        # Status / actions
-        row_status = ctk.CTkFrame(self.tab_groq, fg_color="transparent")
-        row_status.grid(row=1, column=0, sticky="ew", padx=10, pady=0)
-        self.groq_status = ctk.CTkLabel(row_status, text="", text_color="gray")
-        self.groq_status.pack(side="left")
-        self.groq_image_only_var = ctk.BooleanVar(value=self.session.engine.groq_image_models_only)
-        ctk.CTkCheckBox(
-            row_status,
-            text="List image models only",
-            variable=self.groq_image_only_var,
-            command=lambda: (
-                self._persist_image_filter_preference("groq_image_models_only", self.groq_image_only_var.get()),
-                self._display_groq_models(self._groq_models_cache, update_cache=False)
-            ),
-        ).pack(side="right")
-
-        # List
-        self._groq_models_list = ctk.CTkScrollableFrame(self.tab_groq, label_text="Available Groq Models")
-        self._groq_models_list.grid(row=2, column=0, sticky="nsew", padx=10, pady=5)
-
-        # Selection
-        row_sel = ctk.CTkFrame(self.tab_groq, fg_color="transparent")
-        row_sel.grid(row=3, column=0, sticky="ew", padx=10, pady=(5,20))
-        
-        ctk.CTkLabel(row_sel, text="Selected:").pack(side="left")
-        self.groq_model = ctk.CTkEntry(row_sel, width=300)
-        # Default if not set
-        self.groq_model.insert(0, self.session.engine.model_id if self.session.engine.provider == "groq_package" else "llama2-70b-4096") 
-        self.groq_model.pack(side="left", padx=10, fill="x", expand=True)
-        
-        ctk.CTkButton(row_sel, text="Save Config", command=self.save_groq_config).pack(side="right")
-
-    def _update_groq_key_count(self):
-        """Update the key count label based on current textbox content."""
-        text = self.groq_api_keys_textbox.get("1.0", "end-1c")
-        keys = [k.strip() for k in text.splitlines() if k.strip()]
-        count = len(keys)
-        if count == 0:
-            self.groq_key_count_label.configure(text="0 keys", text_color="gray")
-        elif count == 1:
-            self.groq_key_count_label.configure(text="1 key", text_color="#2FA572")
-        else:
-            self.groq_key_count_label.configure(text=f"{count} keys (rotation enabled)", text_color="#2FA572")
-
-    def _get_groq_api_key_for_refresh(self):
-        """Get the first API key from the textbox for model listing."""
-        text = self.groq_api_keys_textbox.get("1.0", "end-1c")
-        keys = [k.strip() for k in text.splitlines() if k.strip()]
-        return keys[0] if keys else ""
-
-    def test_groq_connection(self):
-        # Simplified test calling load_models essentially
-        self._load_and_display_groq_models()
-
-    def save_groq_config(self):
-        model_id = self.groq_model.get().strip()
-        api_keys_text = self.groq_api_keys_textbox.get("1.0", "end-1c").strip()
-        
-        # Validate: at least one key
-        keys = [k.strip() for k in api_keys_text.splitlines() if k.strip()]
-        if not keys:
-             self.groq_status.configure(text="At least one API Key required", text_color="red")
-             return
-
-        self.session.engine.provider = "groq_package"
-        self.session.engine.groq_api_keys = api_keys_text
-        self.session.engine.groq_current_key_index = 0  # Reset rotation on save
-        self.session.engine.model_id = model_id
-        # Groq vision models are multi-modal usually or LLMs.
-        self.session.engine.task = "image-to-text"
-        
-        from src.utils.config_manager import save_config
-        try:
-            save_config(self.session)
-        except Exception:
-            pass
-
-        key_info = f"{len(keys)} key{'s' if len(keys) > 1 else ''}"
-        self.groq_status.configure(text=f"Groq config saved ({key_info})", text_color="green")
-        self._apply_config()
-
-    
-    # ================================================================
-    # OLLAMA API TAB METHODS
-    # ================================================================
-
-    def init_ollama_tab(self):
-        """Initialize the Ollama configuration tab."""
-        self.tab_ollama.grid_columnconfigure(0, weight=1)
-        self.tab_ollama.grid_rowconfigure(2, weight=1)
-
-        # Info banner
-        info_frame = ctk.CTkFrame(self.tab_ollama, fg_color="#1A6B3C", corner_radius=8)
-        info_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(5, 10))
-
-        ctk.CTkLabel(
-            info_frame,
-            text="🦙 Ollama — Run LLMs locally or connect to a remote server.",
-            wraplength=600,
-            font=("Roboto", 11),
-            text_color="white"
-        ).pack(padx=10, pady=8)
-
-        # Host / Key Configuration — split into two sub-rows for breathing room
-        config_frame = ctk.CTkFrame(self.tab_ollama, fg_color="transparent")
-        config_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
-        config_frame.grid_columnconfigure(1, weight=1)
-
-        # ── Sub-row 0: Host URL + Cloud / Local shortcuts
-        ctk.CTkLabel(config_frame, text="Host URL:").grid(row=0, column=0, padx=(0, 5), sticky="w")
-        self.ollama_host_var = ctk.StringVar(value=self.session.engine.ollama_host or "http://localhost:11434")
-        ctk.CTkEntry(config_frame, textvariable=self.ollama_host_var).grid(
-            row=0, column=1, sticky="ew", padx=5
-        )
-
-        shortcut_frame = ctk.CTkFrame(config_frame, fg_color="transparent")
-        shortcut_frame.grid(row=0, column=2, padx=5)
-        ctk.CTkButton(
-            shortcut_frame, text="Cloud", width=55, height=26,
-            font=("Roboto", 10), fg_color="#4B4B4B", hover_color="#5B5B5B",
-            command=lambda: self._set_ollama_host_mode("cloud")
-        ).pack(side="left", padx=2)
-        ctk.CTkButton(
-            shortcut_frame, text="Local", width=55, height=26,
-            font=("Roboto", 10), fg_color="#4B4B4B", hover_color="#5B5B5B",
-            command=lambda: self._set_ollama_host_mode("local")
-        ).pack(side="left", padx=2)
-
-        # ── Sub-row 1: API Key + Refresh + Status
-        self._ollama_key_label = ctk.CTkLabel(config_frame, text="API Key:")
-        self._ollama_key_label.grid(row=1, column=0, padx=(0, 5), pady=(6, 0), sticky="w")
-        self.ollama_key_var = ctk.StringVar(value=self.session.engine.ollama_api_key or "")
-        self._ollama_key_entry = ctk.CTkEntry(config_frame, textvariable=self.ollama_key_var, show="*")
-        self._ollama_key_entry.grid(
-            row=1, column=1, sticky="ew", padx=5, pady=(6, 0)
-        )
-
-        self._ollama_key_btn_frame = ctk.CTkFrame(config_frame, fg_color="transparent")
-        self._ollama_key_btn_frame.grid(row=1, column=2, padx=5, pady=(6, 0))
-        ctk.CTkButton(
-            self._ollama_key_btn_frame, text="Refresh",
-            command=self._load_and_display_ollama_models, width=80
-        ).pack(side="left", padx=2)
-        self._ollama_status = ctk.CTkLabel(self._ollama_key_btn_frame, text="", text_color="gray")
-        self._ollama_status.pack(side="left", padx=6)
-        self.ollama_image_only_var = ctk.BooleanVar(value=self.session.engine.ollama_image_models_only)
-        ctk.CTkCheckBox(
-            config_frame,
-            text="List image models only",
-            variable=self.ollama_image_only_var,
-            command=lambda: (
-                self._persist_image_filter_preference("ollama_image_models_only", self.ollama_image_only_var.get()),
-                self._display_ollama_models(self._ollama_models_cache, update_cache=False)
-            ),
-        ).grid(row=2, column=1, sticky="w", padx=5, pady=(6, 0))
-        self.ollama_host_var.trace_add("write", lambda *_: self._update_ollama_auth_visibility())
-        self._update_ollama_auth_visibility()
-
-        # Models list
-        self._ollama_models_list = ctk.CTkScrollableFrame(
-            self.tab_ollama,
-            label_text="Available Ollama Models"
-        )
-        self._ollama_models_list.grid(row=2, column=0, sticky="nsew", padx=10, pady=5)
-
-        # Selection row
-        row_sel = ctk.CTkFrame(self.tab_ollama, fg_color="transparent")
-        row_sel.grid(row=3, column=0, sticky="ew", padx=10, pady=(5, 20))
-
-        ctk.CTkLabel(row_sel, text="Selected:").pack(side="left")
-        self._ollama_model_entry = ctk.CTkEntry(row_sel, width=300)
-
-        default_model = (
-            self.session.engine.model_id
-            if self.session.engine.provider == "ollama" and self.session.engine.model_id
-            else "llama3:latest"
-        )
-        self._ollama_model_entry.insert(0, default_model)
-        self._ollama_model_entry.pack(side="left", padx=10, fill="x", expand=True)
-
-        ctk.CTkButton(
-            row_sel,
-            text="Save Config",
-            command=self._save_ollama_config
-        ).pack(side="right")
-
-    def _load_and_display_ollama_models(self):
-        """Load models from Ollama server in a background thread."""
-        self._ollama_status.configure(text="Connecting...", text_color="gray")
-        host = self.ollama_host_var.get().strip()
-        key = "" if self._is_local_ollama_host(host) else self.ollama_key_var.get().strip()
-
-        def worker():
-            try:
-                from src.integrations.ollama_client import OllamaClient
-                client = OllamaClient(host=host, api_key=key)
-
-                if not client.is_available():
-                    self._schedule_ui_update(lambda: self._display_ollama_models([]))
-                    return
-
-                models = client.list_models()
-                self._schedule_ui_update(lambda m=models: self._display_ollama_models(m))
-
-            except Exception as e:
-                self._schedule_ui_update(
-                    lambda err=str(e): self._ollama_status.configure(
-                        text=f"Error: {err}", text_color="red"
-                    )
-                )
-
-        self._worker.submit_replacing("ollama_models", worker)
-
-    def _display_ollama_models(self, models, update_cache=True):
-        """Display Ollama models in the scrollable list."""
-        if not self.winfo_exists() or not hasattr(self, "_ollama_models_list"):
-            return
-
-        if update_cache:
-            self._ollama_models_cache = list(models or [])
-        raw_models = list(self._ollama_models_cache)
-        models = self._filter_image_models(raw_models, self.ollama_image_only_var.get())
-
-        for w in self._ollama_models_list.winfo_children():
-            w.destroy()
-
-        # Header
-        header_text = f"{'Model ID':<40} | {'Family':^12} | {'Type':^10} | {'Size':>10}"
-        ctk.CTkLabel(
-            self._ollama_models_list,
-            text=header_text,
-            font=("Courier New", 12, "bold"),
-            text_color="gray",
-            anchor="w"
-        ).pack(fill="x", pady=(5, 10), padx=5)
-
-        if not raw_models:
-            ctk.CTkLabel(
-                self._ollama_models_list,
-                text="No models found or connection failed.\n"
-                     "Make sure Ollama is running and accessible.",
-                text_color="gray",
-                justify="center"
-            ).pack(pady=20)
-            self._ollama_status.configure(text="Connection Failed", text_color="red")
-            return
-        if not models:
-            ctk.CTkLabel(
-                self._ollama_models_list,
-                text="No image-capable Ollama models matched the current filter.",
-                text_color="gray",
-                justify="center"
-            ).pack(pady=20)
-            self._ollama_status.configure(text="0 image models shown", text_color="orange")
-            return
-
-        self._ollama_status.configure(
-            text=(
-                f"{len(models)} of {len(raw_models)} models shown"
-                if self.ollama_image_only_var.get()
-                else f"{len(models)} models found"
-            ),
-            text_color="#2FA572"
-        )
-
-        for m in models:
-            mid = m.get('id', '')
-            family = m.get('family', 'unknown')
-            cap = m.get('capability', 'LLM')
-            size = m.get('size', '')
-
-            display_id = mid[:38] + ".." if len(mid) > 40 else mid
-            display_text = f"{display_id:<40} | {family:^12} | {cap:^10} | {size:>10}"
-
-            btn = ctk.CTkButton(
-                self._ollama_models_list,
-                text=display_text,
-                font=("Courier New", 12),
-                fg_color="transparent",
-                border_width=1,
-                anchor="w",
-                width=0,
-                command=lambda m_id=mid: self._select_ollama_model(m_id)
-            )
-            btn.pack(fill="x", pady=2)
-
-    def _select_ollama_model(self, model_id):
-        self._ollama_model_entry.delete(0, "end")
-        self._ollama_model_entry.insert(0, model_id)
-
-    def _save_ollama_config(self):
-        model_id = self._ollama_model_entry.get().strip()
-        host = self.ollama_host_var.get().strip()
-        key = "" if self._is_local_ollama_host(host) else self.ollama_key_var.get().strip()
-        
-        if not model_id:
-            self._ollama_status.configure(text="Select a model", text_color="red")
-            return
-
-        self.session.engine.provider = "ollama"
-        self.session.engine.model_id = model_id
-        self.session.engine.ollama_host = host
-        self.session.engine.ollama_api_key = key
-        # Assume image-to-text (VLM or description prompt)
-        self.session.engine.task = "image-to-text"
-        
-        from src.utils.config_manager import save_config
-        try:
-            save_config(self.session)
-        except Exception:
-            pass
-            
-        self._ollama_status.configure(
-            text=f"Saved: {model_id}", text_color="green"
-        )
-        self._apply_config()
-
-    def _set_ollama_host_mode(self, mode: str):
-        """Apply a common Ollama host preset."""
-        if mode == "cloud":
-            self.ollama_host_var.set("https://ollama.com")
-        else:
-            self.ollama_host_var.set("http://localhost:11434")
-        self._update_ollama_auth_visibility()
-
-    def _is_local_ollama_host(self, host: str) -> bool:
-        """Return True when the configured Ollama endpoint looks like a local instance."""
-        normalized = (host or "").strip().lower()
-        return any(token in normalized for token in ("localhost", "127.0.0.1", "::1"))
-
-    def _update_ollama_auth_visibility(self):
-        """Hide the API key row when Ollama is configured to use a local host."""
-        if not hasattr(self, "_ollama_key_label"):
-            return
-
-        if self._is_local_ollama_host(self.ollama_host_var.get()):
-            self._ollama_key_label.grid_remove()
-            self._ollama_key_entry.grid_remove()
-            self._ollama_status.configure(text="Local instance detected", text_color="gray")
-        else:
-            self._ollama_key_label.grid()
-            self._ollama_key_entry.grid()
-
-    # ================================================================
-    # NVIDIA NIM TAB METHODS
-    # ================================================================
-
-    def init_nvidia_tab(self):
-        """Initialize the Nvidia NIM configuration tab."""
-        self.tab_nvidia.grid_columnconfigure(0, weight=1)
-        self.tab_nvidia.grid_rowconfigure(2, weight=1)
-
-        # Info banner
-        info_frame = ctk.CTkFrame(self.tab_nvidia, fg_color="#34495E", corner_radius=8)
-        info_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(5, 10))
-
-        ctk.CTkLabel(
-            info_frame,
-            text="🟢 Nvidia NIM — High-performance inference via NVIDIA Inference Microservices.",
-            wraplength=550,
-            font=("Roboto", 11),
-            text_color="white"
-        ).pack(padx=10, pady=8)
-
-        # API Key Configuration
-        row_key = ctk.CTkFrame(self.tab_nvidia, fg_color="transparent")
-        row_key.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
-        row_key.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(row_key, text="API Key:").grid(row=0, column=0, padx=(0, 5), sticky="w")
-        self.nvidia_key_var = ctk.StringVar(value=self.session.engine.nvidia_api_key or "")
-        ctk.CTkEntry(row_key, textvariable=self.nvidia_key_var, show="*", width=300).grid(row=0, column=1, sticky="ew", padx=5)
-
-        ctk.CTkButton(
-            row_key,
-            text="Refresh Models",
-            command=self._load_and_display_nvidia_models,
-            width=120
-        ).grid(row=0, column=2, padx=(10, 0))
-        
-        self._nvidia_status = ctk.CTkLabel(row_key, text="", text_color="gray")
-        self._nvidia_status.grid(row=0, column=3, padx=10)
-        self.nvidia_image_only_var = ctk.BooleanVar(value=self.session.engine.nvidia_image_models_only)
-        ctk.CTkCheckBox(
-            row_key,
-            text="List image models only",
-            variable=self.nvidia_image_only_var,
-            command=lambda: (
-                self._persist_image_filter_preference("nvidia_image_models_only", self.nvidia_image_only_var.get()),
-                self._display_nvidia_models(self._nvidia_models_cache, update_cache=False)
-            ),
-        ).grid(row=1, column=1, sticky="w", padx=5, pady=(6, 0))
-
-        # Models list
-        self._nvidia_models_list = ctk.CTkScrollableFrame(
-            self.tab_nvidia,
-            label_text="Available Nvidia models"
-        )
-        self._nvidia_models_list.grid(row=2, column=0, sticky="nsew", padx=10, pady=5)
-
-        # Selection row
-        row_sel = ctk.CTkFrame(self.tab_nvidia, fg_color="transparent")
-        row_sel.grid(row=3, column=0, sticky="ew", padx=10, pady=(5, 20))
-
-        ctk.CTkLabel(row_sel, text="Selected:").pack(side="left")
-        self._nvidia_model_entry = ctk.CTkEntry(row_sel, width=300)
-        
-        default_model = (
-            self.session.engine.model_id
-            if self.session.engine.provider == "nvidia" and self.session.engine.model_id
-            else "mistralai/mistral-large-3-675b-instruct-2512"
-        )
-        self._nvidia_model_entry.insert(0, default_model)
-        self._nvidia_model_entry.pack(side="left", padx=10, fill="x", expand=True)
-
-        ctk.CTkButton(
-            row_sel,
-            text="Save Config",
-            command=self._save_nvidia_config
-        ).pack(side="right")
-
-    def _load_and_display_nvidia_models(self):
-        """Load models from Nvidia NIM in a background thread."""
-        self._nvidia_status.configure(text="Connecting...", text_color="gray")
-        key = self.nvidia_key_var.get().strip()
-
-        def worker():
-            try:
-                from src.integrations.nvidia_client import NvidiaClient
-                client = NvidiaClient(api_key=key)
-
-                if not client.is_available():
-                    self._schedule_ui_update(lambda: self._display_nvidia_models([]))
-                    return
-
-                models = client.list_models()
-                self._schedule_ui_update(lambda m=models: self._display_nvidia_models(m))
-
-            except Exception as e:
-                self._schedule_ui_update(
-                    lambda err=str(e): self._nvidia_status.configure(
-                        text=f"Error: {err}", text_color="red"
-                    )
-                )
-
-        self._worker.submit_replacing("nvidia_models", worker)
-
-    def _display_nvidia_models(self, models, update_cache=True):
-        """Display Nvidia models in the scrollable list."""
-        if not self.winfo_exists() or not hasattr(self, "_nvidia_models_list"):
-            return
-
-        if update_cache:
-            self._nvidia_models_cache = list(models or [])
-        raw_models = list(self._nvidia_models_cache)
-        models = self._filter_image_models(raw_models, self.nvidia_image_only_var.get())
-
-        for w in self._nvidia_models_list.winfo_children():
-            w.destroy()
-
-        # Header
-        header_text = f"{'Model ID':<40} | {'Provider':^15} | {'Capability':>15}"
-        ctk.CTkLabel(
-            self._nvidia_models_list,
-            text=header_text,
-            font=("Courier New", 12, "bold"),
-            text_color="gray",
-            anchor="w"
-        ).pack(fill="x", pady=(5, 10), padx=5)
-
-        if not raw_models:
-            ctk.CTkLabel(
-                self._nvidia_models_list,
-                text="No models found or connection failed.\n"
-                     "Check your API key.",
-                text_color="gray",
-                justify="center"
-            ).pack(pady=20)
-            self._nvidia_status.configure(text="Connection Failed", text_color="red")
-            return
-        if not models:
-            ctk.CTkLabel(
-                self._nvidia_models_list,
-                text="No image-capable NVIDIA models matched the current filter.",
-                text_color="gray",
-                justify="center"
-            ).pack(pady=20)
-            self._nvidia_status.configure(text="0 image models shown", text_color="orange")
-            return
-
-        self._nvidia_status.configure(
-            text=(
-                f"{len(models)} of {len(raw_models)} models shown"
-                if self.nvidia_image_only_var.get()
-                else f"{len(models)} models found"
-            ),
-            text_color="#2FA572"
-        )
-
-        for m in models:
-            mid = m.get('id', '')
-            prov = m.get('provider', 'Nvidia')
-            cap = m.get('capability', 'Vision')
-
-            display_id = mid[:38] + ".." if len(mid) > 40 else mid
-            display_text = f"{display_id:<40} | {prov:^15} | {cap:>15}"
-
-            btn = ctk.CTkButton(
-                self._nvidia_models_list,
-                text=display_text,
-                font=("Courier New", 12),
-                fg_color="transparent",
-                border_width=1,
-                anchor="w",
-                width=0,
-                command=lambda m_id=mid: self._select_nvidia_model(m_id)
-            )
-            btn.pack(fill="x", pady=2)
-
-    def _select_nvidia_model(self, model_id):
-        self._nvidia_model_entry.delete(0, "end")
-        self._nvidia_model_entry.insert(0, model_id)
-
-    def _save_nvidia_config(self):
-        model_id = self._nvidia_model_entry.get().strip()
-        key = self.nvidia_key_var.get().strip()
-        
-        if not model_id:
-            self._nvidia_status.configure(text="Select a model", text_color="red")
-            return
-
-        self.session.engine.provider = "nvidia"
-        self.session.engine.model_id = model_id
-        self.session.engine.nvidia_api_key = key
-        # Nvidia vision models are multi-modal
-        self.session.engine.task = "image-to-text"
-        
-        from src.utils.config_manager import save_config
-        try:
-            save_config(self.session)
-        except Exception:
-            pass
-            
-        self._nvidia_status.configure(
-            text=f"Saved: {model_id}", text_color="green"
-        )
-        self._apply_config()
-
-    # ================================================================
-    # GOOGLE AI STUDIO TAB METHODS
-    # ================================================================
-
-    def init_google_ai_tab(self):
-        """Initialize the Google AI Studio configuration tab."""
-        self.tab_google_ai.grid_columnconfigure(0, weight=1)
-        self.tab_google_ai.grid_rowconfigure(2, weight=1)
-
-        # Info banner
-        info_frame = ctk.CTkFrame(self.tab_google_ai, fg_color="#1A73E8", corner_radius=8)
-        info_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(5, 10))
-
-        ctk.CTkLabel(
-            info_frame,
-            text="✨ Google AI Studio — Access Gemini models with a free tier.",
-            wraplength=550,
-            font=("Roboto", 11),
-            text_color="white"
-        ).pack(padx=10, pady=8)
-
-        # API Key Configuration
-        row_key = ctk.CTkFrame(self.tab_google_ai, fg_color="transparent")
-        row_key.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
-        row_key.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(row_key, text="API Key:").grid(row=0, column=0, padx=(0, 5), sticky="w")
-        self.google_ai_key_var = ctk.StringVar(value=self.session.engine.google_ai_api_key or "")
-        ctk.CTkEntry(row_key, textvariable=self.google_ai_key_var, show="*", width=300).grid(row=0, column=1, sticky="ew", padx=5)
-
-        ctk.CTkButton(
-            row_key,
-            text="Refresh Models",
-            command=self._load_and_display_google_ai_models,
-            width=120
-        ).grid(row=0, column=2, padx=(10, 0))
-
-        self._google_ai_status = ctk.CTkLabel(row_key, text="", text_color="gray")
-        self._google_ai_status.grid(row=0, column=3, padx=10)
-        self.google_ai_image_only_var = ctk.BooleanVar(value=self.session.engine.google_ai_image_models_only)
-        ctk.CTkCheckBox(
-            row_key,
-            text="List image models only",
-            variable=self.google_ai_image_only_var,
-            command=lambda: (
-                self._persist_image_filter_preference("google_ai_image_models_only", self.google_ai_image_only_var.get()),
-                self._display_google_ai_models(self._google_ai_models_cache, update_cache=False)
-            ),
-        ).grid(row=1, column=1, sticky="w", padx=5, pady=(6, 0))
-
-        # Models list
-        self._google_ai_models_list = ctk.CTkScrollableFrame(
-            self.tab_google_ai,
-            label_text="Available Google AI Models"
-        )
-        self._google_ai_models_list.grid(row=2, column=0, sticky="nsew", padx=10, pady=5)
-
-        # Selection row
-        row_sel = ctk.CTkFrame(self.tab_google_ai, fg_color="transparent")
-        row_sel.grid(row=3, column=0, sticky="ew", padx=10, pady=(5, 20))
-
-        ctk.CTkLabel(row_sel, text="Selected:").pack(side="left")
-        self._google_ai_model_entry = ctk.CTkEntry(row_sel, width=300)
-
-        default_model = (
-            self.session.engine.model_id
-            if self.session.engine.provider == "google_ai" and self.session.engine.model_id
-            else "gemini-2.5-flash"
-        )
-        self._google_ai_model_entry.insert(0, default_model)
-        self._google_ai_model_entry.pack(side="left", padx=10, fill="x", expand=True)
-
-        ctk.CTkButton(
-            row_sel,
-            text="Save Config",
-            command=self._save_google_ai_config
-        ).pack(side="right")
-
-    def _load_and_display_google_ai_models(self):
-        """Load models from Google AI in a background thread."""
-        self._google_ai_status.configure(text="Connecting...", text_color="gray")
-        key = self.google_ai_key_var.get().strip()
-
-        def worker():
-            try:
-                from src.integrations.google_ai_client import GoogleAIClient
-                client = GoogleAIClient(api_key=key)
-
-                if not client.is_available():
-                    self._schedule_ui_update(lambda: self._display_google_ai_models([]))
-                    return
-
-                models = client.list_models()
-                self._schedule_ui_update(lambda m=models: self._display_google_ai_models(m))
-
-            except Exception as e:
-                self._schedule_ui_update(
-                    lambda err=str(e): self._google_ai_status.configure(
-                        text=f"Error: {err}", text_color="red"
-                    )
-                )
-
-        self._worker.submit_replacing("google_ai_models", worker)
-
-    def _display_google_ai_models(self, models, update_cache=True):
-        """Display Google AI models in the scrollable list."""
-        if not self.winfo_exists() or not hasattr(self, "_google_ai_models_list"):
-            return
-
-        if update_cache:
-            self._google_ai_models_cache = list(models or [])
-        raw_models = list(self._google_ai_models_cache)
-        models = self._filter_image_models(raw_models, self.google_ai_image_only_var.get())
-
-        for w in self._google_ai_models_list.winfo_children():
-            w.destroy()
-
-        # Header
-        header_text = f"{'Model ID':<40} | {'Provider':^15} | {'Capability':>15}"
-        ctk.CTkLabel(
-            self._google_ai_models_list,
-            text=header_text,
-            font=("Courier New", 12, "bold"),
-            text_color="gray",
-            anchor="w"
-        ).pack(fill="x", pady=(5, 10), padx=5)
-
-        if not raw_models:
-            ctk.CTkLabel(
-                self._google_ai_models_list,
-                text="No models found or connection failed.\n"
-                     "Check your API key.",
-                text_color="gray",
-                justify="center"
-            ).pack(pady=20)
-            self._google_ai_status.configure(text="Connection Failed", text_color="red")
-            return
-        if not models:
-            ctk.CTkLabel(
-                self._google_ai_models_list,
-                text="No image-capable Google AI models matched the current filter.",
-                text_color="gray",
-                justify="center"
-            ).pack(pady=20)
-            self._google_ai_status.configure(text="0 image models shown", text_color="orange")
-            return
-
-        self._google_ai_status.configure(
-            text=(
-                f"{len(models)} of {len(raw_models)} models shown"
-                if self.google_ai_image_only_var.get()
-                else f"{len(models)} models found"
-            ),
-            text_color="#2FA572"
-        )
-
-        for m in models:
-            mid = m.get('id', '')
-            prov = m.get('provider', 'Google')
-            cap = m.get('capability', 'Multi-modal')
-
-            display_id = mid[:38] + ".." if len(mid) > 40 else mid
-            display_text = f"{display_id:<40} | {prov:^15} | {cap:>15}"
-
-            btn = ctk.CTkButton(
-                self._google_ai_models_list,
-                text=display_text,
-                font=("Courier New", 12),
-                fg_color="transparent",
-                border_width=1,
-                anchor="w",
-                width=0,
-                command=lambda m_id=mid: self._select_google_ai_model(m_id)
-            )
-            btn.pack(fill="x", pady=2)
-
-    def _select_google_ai_model(self, model_id):
-        self._google_ai_model_entry.delete(0, "end")
-        self._google_ai_model_entry.insert(0, model_id)
-
-    def _save_google_ai_config(self):
-        model_id = self._google_ai_model_entry.get().strip()
-        key = self.google_ai_key_var.get().strip()
-
-        if not model_id:
-            self._google_ai_status.configure(text="Select a model", text_color="red")
-            return
-
-        self.session.engine.provider = "google_ai"
-        self.session.engine.model_id = model_id
-        self.session.engine.google_ai_api_key = key
-        # Gemini models are multi-modal
-        self.session.engine.task = "image-to-text"
-
-        from src.utils.config_manager import save_config
-        try:
-            save_config(self.session)
-        except Exception:
-            pass
-
-        self._google_ai_status.configure(
-            text=f"Saved: {model_id}", text_color="green"
-        )
-        self._apply_config()
-
-    # ================================================================
-    # CEREBRAS INFERENCE TAB METHODS
-    # ================================================================
-
-    def init_cerebras_tab(self):
-        """Initialize the Cerebras Inference configuration tab."""
-        self.tab_cerebras.grid_columnconfigure(0, weight=1)
-        self.tab_cerebras.grid_rowconfigure(2, weight=1)
-
-        # Info banner — Cerebras orange brand colour
-        info_frame = ctk.CTkFrame(self.tab_cerebras, fg_color="#E05C00", corner_radius=8)
-        info_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(5, 10))
-
-        ctk.CTkLabel(
-            info_frame,
-            text=(
-                "⚡ Cerebras — World's fastest LLM inference. "
-                "Get your API key at cloud.cerebras.ai"
-            ),
-            wraplength=550,
-            font=("Roboto", 11),
-            text_color="white",
-        ).pack(padx=10, pady=8)
-
-        # API Key Configuration
-        row_key = ctk.CTkFrame(self.tab_cerebras, fg_color="transparent")
-        row_key.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
-        row_key.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(row_key, text="API Key:").grid(row=0, column=0, padx=(0, 5), sticky="w")
-        self.cerebras_key_var = ctk.StringVar(
-            value=self.session.engine.cerebras_api_key or ""
-        )
-        ctk.CTkEntry(
-            row_key, textvariable=self.cerebras_key_var, show="*", width=300
-        ).grid(row=0, column=1, sticky="ew", padx=5)
-
-        ctk.CTkButton(
-            row_key,
-            text="Refresh Models",
-            command=self._load_and_display_cerebras_models,
-            width=120,
-        ).grid(row=0, column=2, padx=(10, 0))
-
-        self._cerebras_status = ctk.CTkLabel(row_key, text="", text_color="gray")
-        self._cerebras_status.grid(row=0, column=3, padx=10)
-        self.cerebras_image_only_var = ctk.BooleanVar(value=self.session.engine.cerebras_image_models_only)
-        ctk.CTkCheckBox(
-            row_key,
-            text="List image models only",
-            variable=self.cerebras_image_only_var,
-            command=lambda: (
-                self._persist_image_filter_preference("cerebras_image_models_only", self.cerebras_image_only_var.get()),
-                self._display_cerebras_models(self._cerebras_models_cache, update_cache=False)
-            ),
-        ).grid(row=1, column=1, sticky="w", padx=5, pady=(6, 0))
-
-        # Models list
-        self._cerebras_models_list = ctk.CTkScrollableFrame(
-            self.tab_cerebras, label_text="Available Cerebras Models"
-        )
-        self._cerebras_models_list.grid(row=2, column=0, sticky="nsew", padx=10, pady=5)
-
-        # Selection row
-        row_sel = ctk.CTkFrame(self.tab_cerebras, fg_color="transparent")
-        row_sel.grid(row=3, column=0, sticky="ew", padx=10, pady=(5, 20))
-
-        ctk.CTkLabel(row_sel, text="Selected:").pack(side="left")
-        self._cerebras_model_entry = ctk.CTkEntry(row_sel, width=300)
-
-        default_model = (
-            self.session.engine.model_id
-            if self.session.engine.provider == "cerebras" and self.session.engine.model_id
-            else "llama3.1-8b"
-        )
-        self._cerebras_model_entry.insert(0, default_model)
-        self._cerebras_model_entry.pack(side="left", padx=10, fill="x", expand=True)
-
-        ctk.CTkButton(
-            row_sel,
-            text="Save Config",
-            command=self._save_cerebras_config,
-        ).pack(side="right")
-
-    def _load_and_display_cerebras_models(self):
-        """Load models from Cerebras API in a background thread."""
-        self._cerebras_status.configure(text="Connecting...", text_color="gray")
-        key = self.cerebras_key_var.get().strip()
-
-        def worker():
-            try:
-                from src.integrations.cerebras_client import CerebrasClient
-                client = CerebrasClient(api_key=key)
-                if not client.has_sdk():
-                    self._schedule_ui_update(
-                        lambda: self._cerebras_status.configure(
-                            text="SDK missing: install cerebras_cloud_sdk",
-                            text_color="orange",
-                        )
-                    )
-                models = client.list_models(limit=40)
-                self._schedule_ui_update(lambda m=models: self._display_cerebras_models(m))
-            except Exception as exc:
-                self._schedule_ui_update(
-                    lambda err=str(exc): self._cerebras_status.configure(
-                        text=f"Error: {err}", text_color="red"
-                    )
-                )
-
-        self._worker.submit_replacing("cerebras_models", worker)
-
-    def _display_cerebras_models(self, models, update_cache=True):
-        """Display Cerebras models in the scrollable list."""
-        if not self.winfo_exists() or not hasattr(self, "_cerebras_models_list"):
-            return
-
-        if update_cache:
-            self._cerebras_models_cache = list(models or [])
-        raw_models = list(self._cerebras_models_cache)
-        models = self._filter_image_models(raw_models, self.cerebras_image_only_var.get())
-
-        for w in self._cerebras_models_list.winfo_children():
-            w.destroy()
-
-        # Header
-        header_text = f"{'Model ID':<35} | {'Provider':^12} | {'Capability':>18}"
-        ctk.CTkLabel(
-            self._cerebras_models_list,
-            text=header_text,
-            font=("Courier New", 12, "bold"),
-            text_color="gray",
-            anchor="w",
-        ).pack(fill="x", pady=(5, 10), padx=5)
-
-        if not raw_models:
-            ctk.CTkLabel(
-                self._cerebras_models_list,
-                text="No models found.\nCheck your API key or network connection.",
-                text_color="gray",
-                justify="center",
-            ).pack(pady=20)
-            self._cerebras_status.configure(text="No models found", text_color="orange")
-            return
-        if not models:
-            ctk.CTkLabel(
-                self._cerebras_models_list,
-                text="No image-capable Cerebras models matched the current filter.",
-                text_color="gray",
-                justify="center",
-            ).pack(pady=20)
-            self._cerebras_status.configure(text="0 image models shown", text_color="orange")
-            return
-
-        self._cerebras_status.configure(
-            text=(
-                f"{len(models)} of {len(raw_models)} models shown"
-                if self.cerebras_image_only_var.get()
-                else f"{len(models)} models found"
-            ),
-            text_color="#2FA572"
-        )
-
-        for m in models:
-            mid = m.get("id", "")
-            prov = m.get("provider", "Cerebras")
-            cap = m.get("capability", "LLM")
-
-            display_id = mid[:33] + ".." if len(mid) > 35 else mid
-            display_text = f"{display_id:<35} | {prov:^12} | {cap:>18}"
-
-            btn = ctk.CTkButton(
-                self._cerebras_models_list,
-                text=display_text,
-                font=("Courier New", 12),
-                fg_color="transparent",
-                border_width=1,
-                anchor="w",
-                width=0,
-                command=lambda m_id=mid: self._select_cerebras_model(m_id),
-            )
-            btn.pack(fill="x", pady=2)
-
-    def _select_cerebras_model(self, model_id):
-        self._cerebras_model_entry.delete(0, "end")
-        self._cerebras_model_entry.insert(0, model_id)
-
-    def _save_cerebras_config(self):
-        model_id = self._cerebras_model_entry.get().strip()
-        key = self.cerebras_key_var.get().strip()
-
-        if not key:
-            self._cerebras_status.configure(text="API key required", text_color="red")
-            return
-
-        if not model_id:
-            self._cerebras_status.configure(text="Select a model", text_color="red")
-            return
-
-        self.session.engine.provider = "cerebras"
-        self.session.engine.model_id = model_id
-        self.session.engine.cerebras_api_key = key
-        # Cerebras models are text-based (image sent as base64 data URL or text fallback)
-        self.session.engine.task = "image-to-text"
-
-        from src.utils.config_manager import save_config
-        try:
-            save_config(self.session)
-        except Exception:
-            pass
-
-        status_text = f"Saved: {model_id}"
-        status_color = "green"
-        try:
-            from src.integrations.cerebras_client import CerebrasClient
-
-            client = CerebrasClient(api_key=key)
-            availability_error = client.availability_error()
-            if availability_error:
-                status_text = f"{status_text} | {availability_error}"
-                status_color = "orange"
-        except Exception:
-            pass
-
-        self._cerebras_status.configure(text=status_text, text_color=status_color)
-        self._apply_config()
-
-    # ================================================================
-    # CLEANUP
-    # ================================================================
-
-    def destroy(self):
-        """Override destroy to clean up worker thread."""
-        if hasattr(self, '_worker'):
-            self._worker.shutdown()
-        super().destroy()
-
-
-    def init_local_tab(self):
-        self.tab_local.grid_columnconfigure(0, weight=1)
-        self.tab_local.grid_rowconfigure(1, weight=1)  # List area grows
-
-        # Header with cache info
-        header = ctk.CTkFrame(self.tab_local, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
-        
-        ctk.CTkLabel(header, text="📦 Downloaded Models", 
-                     font=("Roboto", 16, "bold")).pack(side="left", padx=5)
-        
-        self.cache_count_label = ctk.CTkLabel(header, text="(0 models)", 
-                                              text_color="gray")
-        self.cache_count_label.pack(side="left", padx=5)
-        
-        ctk.CTkButton(header, text="+ Find & Download Models", 
-                      command=self.open_download_manager, 
-                      width=180).pack(side="right", padx=5)
-
-        # List of cached models ONLY
-        self.local_list_frame = ctk.CTkScrollableFrame(
-            self.tab_local, 
-            label_text="Ready for Local Inference"
-        )
-        self.local_list_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=5)
-        
-        # Add a header label for clarity
-        header_text = f"{'Model ID':<40} | {'Capability':^15} | {'Size':>10}"
-        self.list_header = ctk.CTkLabel(
-            self.local_list_frame, 
-            text=header_text, 
-            font=("Courier New", 12, "bold"),
-            text_color="gray",
-            anchor="w"
-        )
-        self.list_header.pack(fill="x", pady=(5, 10), padx=5)
-        
-        # Selection and action
-        footer = ctk.CTkFrame(self.tab_local, fg_color="transparent")
-        footer.grid(row=2, column=0, sticky="ew", padx=10, pady=10)
-        
-        ctk.CTkLabel(footer, text="Selected:").pack(side="left")
-        self.local_model_var = ctk.StringVar(value=self.session.engine.model_id or "")
-        ctk.CTkLabel(footer, textvariable=self.local_model_var, 
-                     font=("Roboto", 12, "bold")).pack(side="left", padx=10)
-        
-        ctk.CTkButton(footer, text="Use for Local Inference", 
-                      command=self.save_local).pack(side="right")
-        
-        # Load cached models
-        self.refresh_local_cache()
-
-    def open_download_manager(self):
-        """Opens a separate dialog for browsing and downloading models."""
-        DownloadManagerDialog(self, self.session)
-
-    def refresh_local_cache(self):
-        """Refresh the list of locally cached models."""
-        for widget in self.local_list_frame.winfo_children():
-            widget.destroy()
-        
-        try:
-            from src.core import huggingface_utils
-            # Get ALL local models, not filtered by task yet
-            all_local = huggingface_utils.find_local_models()
-            
-            if not all_local:
-                ctk.CTkLabel(
-                    self.local_list_frame, 
-                    text="No models downloaded yet.\nClick '+ Find & Download Models' to browse the Hub.",
-                    text_color="gray",
-                    justify="center"
-                ).pack(pady=20)
-                self.cache_count_label.configure(text="(0 models, 0 B)")
-            else:
-                total_bytes = sum(m.get('size_bytes', 0) for m in all_local.values())
-                total_str = huggingface_utils.format_size(total_bytes)
-                self.cache_count_label.configure(text=f"({len(all_local)} models, {total_str})")
-                
-                # Sort models by size descending
-                sorted_models = sorted(all_local.items(), key=lambda x: x[1].get('size_bytes', 0), reverse=True)
-                
-                for model_id, info in sorted_models:
-                    self.add_cached_model_item(
-                        model_id, 
-                        info.get('size_str', 'Unknown size'),
-                        info.get('capability', 'Unknown')
-                    )
-                    
-        except Exception as e:
-            ctk.CTkLabel(
-                self.local_list_frame, 
-                text=f"Error scanning cache: {e}",
-                text_color="red"
-            ).pack()
-
-    def add_cached_model_item(self, model_id, size_str, capability):
-        """Add a cached model to the list."""
-        frame = ctk.CTkFrame(self.local_list_frame)
-        frame.pack(fill="x", pady=2)
-        
-        # Format the text with "columns" using padding/fixed width font if possible, 
-        # but for now a nice formatted string.
-        display_text = f"✓ {model_id:<40} | {capability:^15} | {size_str:>10}"
-        
-        btn = ctk.CTkButton(
-            frame, 
-            text=display_text, 
-            font=("Courier New", 12), # Using monospace for column-like look
-            fg_color="transparent", 
-            border_width=1,
-            text_color="#2FA572",
-            anchor="w",
-            command=lambda m=model_id: self.select_local_model(m)
-        )
-        btn.pack(side="left", fill="x", expand=True)
-        
-        # Delete button
-        ctk.CTkButton(
-            frame,
-            text="🗑️",
-            width=30,
-            fg_color="transparent",
-            hover_color="red",
-            command=lambda m=model_id: self.delete_cached_model(m)
-        ).pack(side="right", padx=2)
-
-    def select_local_model(self, model_id):
-        self.local_model_var.set(model_id)
-
-    def delete_cached_model(self, model_id):
-        """Delete a cached model from disk."""
-        # Simple confirmation using tkinter.messagebox if available, or just delete for now
-        import tkinter.messagebox as mb
-        if mb.askyesno("Confirm Delete", f"Are you sure you want to delete {model_id} from local cache?\nThis will free up disk space."):
-            try:
-                from src.core import huggingface_utils
-                import shutil
-                import os
-                
-                path = huggingface_utils.get_model_cache_dir(model_id)
-                if os.path.exists(path):
-                    shutil.rmtree(path)
-                    logger.info(f"Deleted model directory: {path}")
-                
-                self.refresh_local_cache()
-            except Exception as e:
-                mb.showerror("Error", f"Failed to delete model: {e}")
-
-    def save_local(self):
-        self.session.engine.provider = "local"
-        self.session.engine.model_id = self.local_model_var.get()
-        # Find task from cache
-        try:
-            from src.core import huggingface_utils
-            local_models = huggingface_utils.find_local_models()
-            model_info = local_models.get(self.session.engine.model_id)
-            if model_info:
-                # Use the newly added suggested_task from hf_utils
-                self.session.engine.task = model_info.get('suggested_task', "image-classification")
-                logger.debug(f"Setting task for {self.session.engine.model_id} to {self.session.engine.task}")
-        except Exception as e:
-            logger.debug(f"Could not determine task for local model: {e}")
-        self._apply_config()
-
-    def validate_model_id(self, model_id, provider):
-        """Basic validation to prevent using OR models with HF engine and vice versa."""
-        if provider == "huggingface":
-            if ":" in model_id and "/" not in model_id.split(":")[0]:
-                # Looks like 'google/gemini...:free' or similar
-                import tkinter.messagebox as mb
-                return mb.askyesno("Potential Error", 
-                                  f"The model ID '{model_id}' looks like it might be an OpenRouter model.\n\n"
-                                  "Are you sure you want to use it with the Hugging Face engine?")
-        elif provider == "openrouter":
-            if "/" in model_id and ":" not in model_id:
-                # Looks like 'org/model' without a suffix, which is common for HF
-                # OpenRouter also uses org/model but often has suffixes or specific names
-                pass
-        return True
-
-    def init_hf_tab(self):
-        self.tab_hf.grid_columnconfigure(0, weight=1)
-        self.tab_hf.grid_rowconfigure(4, weight=1)  # List area grows
-
-        # API Key
-        row1 = ctk.CTkFrame(self.tab_hf, fg_color="transparent")
-        row1.grid(row=0, column=0, sticky="ew", padx=10, pady=5)
-        ctk.CTkLabel(row1, text="API Key:").pack(side="left")
-        self.hf_key = ctk.CTkEntry(row1, width=250, show="*")
-        self.hf_key.insert(0, self.session.engine.api_key or "")
-        self.hf_key.pack(side="left", padx=10, fill="x", expand=True)
-
-        # Rate Limit Warning Banner
-        warning_frame = ctk.CTkFrame(self.tab_hf, fg_color="#FF6B35", corner_radius=8)
-        warning_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=10)
-        
-        warning_icon = ctk.CTkLabel(warning_frame, text="⚠️", font=("Roboto", 16))
-        warning_icon.pack(side="left", padx=10)
-        
-        warning_text = ctk.CTkLabel(
-            warning_frame, 
-            text="⚡ API Test Mode: Free tier has rate limits (~15 req/hour). Multi-modal models (Image+Text) are supported.",
-            wraplength=500,
-            font=("Roboto", 11)
-        )
-        warning_text.pack(side="left", padx=5, pady=8)
-
-        # Search Tools (Mirroring OR style)
-        row3 = ctk.CTkFrame(self.tab_hf, fg_color="transparent")
-        row3.grid(row=2, column=0, sticky="ew", padx=10, pady=5)
-        self.hf_search = ctk.CTkEntry(row3, placeholder_text="Search multi-modal models (e.g. 'blip', 'vit-gpt2')...")
-        self.hf_search.pack(side="left", fill="x", expand=True, padx=(0,5))
-        self.hf_search.bind("<Return>", lambda e: self.search_hf_online())
-        ctk.CTkButton(row3, text="Search Hub", width=100, command=self.search_hf_online).pack(side="left")
-        self.hf_image_only_var = ctk.BooleanVar(value=self.session.engine.huggingface_image_models_only)
-        ctk.CTkCheckBox(
-            row3,
-            text="List image models only",
-            variable=self.hf_image_only_var,
-            command=lambda: (
-                self._persist_image_filter_preference("huggingface_image_models_only", self.hf_image_only_var.get()),
-                self.show_hf_results(self._hf_results_cache, update_cache=False)
-            ),
-        ).pack(side="left", padx=10)
-
-        # List
-        self.hf_list = ctk.CTkScrollableFrame(self.tab_hf, label_text="Recommended Multi-modal Models")
-        self.hf_list.grid(row=3, column=0, sticky="nsew", padx=10, pady=5)
-
-        # Add header
-        header_text = f"{'Model ID':<40} | {'Capability':^15} | {'Size':>10}"
-        self.hf_list_header = ctk.CTkLabel(
-            self.hf_list, 
-            text=header_text, 
-            font=("Courier New", 12, "bold"),
-            text_color="gray",
-            anchor="w"
-        )
-        self.hf_list_header.pack(fill="x", pady=(5, 10), padx=5)
-
-        # Selection
-        row4 = ctk.CTkFrame(self.tab_hf, fg_color="transparent")
-        row4.grid(row=4, column=0, sticky="ew", padx=10, pady=(10,20))
-        
-        ctk.CTkLabel(row4, text="Selected:").pack(side="left")
-        self.hf_model = ctk.CTkEntry(row4, width=250)
-        self.hf_model.insert(0, self.session.engine.model_id or "Salesforce/blip-image-captioning-base")
-        self.hf_model.pack(side="left", padx=10, fill="x", expand=True)
-        
-        btn_save_config = ctk.CTkButton(row4, text="Save Config", width=100, command=self.save_hf)
-        btn_save_config.pack(side="right", padx=5)
-        
-        btn_download = ctk.CTkButton(row4, text="Download for Local Use", width=150, fg_color="#2FA572", command=self.download_selected_hf_for_local)
-        btn_download.pack(side="right", padx=5)
-
-    def download_selected_hf_for_local(self):
-        model_id = self.hf_model.get()
-        if not model_id:
-            return
-        
-        # Open download manager directly for this model
-        dm = DownloadManagerDialog(self, self.session)
-        dm.search_entry.delete(0, "end")
-        dm.search_entry.insert(0, model_id)
-        dm.start_search()
-
-    def search_hf_online(self):
-        query = self.hf_search.get()
-        # Clear list
-        for w in self.hf_list.winfo_children():
-            w.destroy()
-        ctk.CTkLabel(self.hf_list, text="Searching Hub...", text_color="gray").pack(pady=10)
-        
-        def worker():
-            try:
-                from huggingface_hub import list_models
-                from src.core import huggingface_utils, config
-                
-                tasks = [
-                    config.MODEL_TASK_IMAGE_CLASSIFICATION,
-                    config.MODEL_TASK_IMAGE_TO_TEXT,
-                    config.MODEL_TASK_ZERO_SHOT,
-                    "visual-question-answering",
-                    "image-text-to-text"
-                ]
-                
-                all_results = []
-                for t in tasks:
-                    models = list_models(
-                        filter=t,
-                        search=query,
-                        limit=5,
-                        sort="downloads",
-                    )
-                    for m in models:
-                        all_results.append({
-                            'id': m.id,
-                            'task': t,
-                            'capability': huggingface_utils.get_model_capability(t)
-                        })
-                
-                # Deduplicate
-                seen = set()
-                unique_results = []
-                for r in all_results:
-                    if r['id'] not in seen:
-                        unique_results.append(r)
-                        seen.add(r['id'])
-                
-                # Filter out models that our local transformers runtime cannot actually load.
-                unique_results = [
-                    r for r in unique_results
-                    if huggingface_utils.is_model_suitable_for_local_inference(r['id'], task=r['task'])
-                ]
-                
-                # Fetch sizes
-                results_with_details = []
-                for item in unique_results:
-                    mid = item['id']
-                    size_bytes = huggingface_utils.get_remote_model_size(mid)
-                    item['size_str'] = huggingface_utils.format_size(size_bytes)
-                    results_with_details.append(item)
-
-                self.after(0, lambda: self.show_hf_results(results_with_details) if self.winfo_exists() else None)
-            except Exception as e:
-                error_msg = str(e)
-                self.after(0, lambda: self.show_hf_results([], error=error_msg) if self.winfo_exists() else None)
-        
-        # Use submit_replacing so rapid searches only execute the final one
-        self._worker.submit_replacing("hf_search", worker)
-
-    def show_hf_results(self, results, error=None, update_cache=True):
-        if update_cache:
-            self._hf_results_cache = list(results or [])
-        raw_results = list(self._hf_results_cache)
-        results = self._filter_image_models(raw_results, self.hf_image_only_var.get())
-
-        for w in self.hf_list.winfo_children():
-            w.destroy()
-        
-        # Re-add header
-        header_text = f"{'Model ID':<40} | {'Capability':^15} | {'Size':>10}"
-        ctk.CTkLabel(self.hf_list, text=header_text, font=("Courier New", 12, "bold"), text_color="gray", anchor="w").pack(fill="x", pady=(5, 10), padx=5)
-
-        if error:
-            ctk.CTkLabel(self.hf_list, text=f"Error: {error}", text_color="red").pack()
-            return
-
-        if not raw_results:
-            ctk.CTkLabel(self.hf_list, text="No models found.").pack()
-            return
-        if not results:
-            ctk.CTkLabel(self.hf_list, text="No image-capable models matched the current filter.").pack()
-            return
-
-        for item in results:
-            mid = item['id']
-            size_str = item.get('size_str', 'Unknown')
-            capability = item.get('capability', 'Unknown')
-            
-            display_text = f"{mid:<40} | {capability:^15} | {size_str:>10}"
-            
-            btn = ctk.CTkButton(
-                self.hf_list, 
-                text=display_text, 
-                font=("Courier New", 12),
-                fg_color="transparent", 
-                border_width=1, 
-                anchor="w", 
-                command=lambda m=mid: self.select_hf_model(m)
-            )
-            btn.pack(fill="x", pady=2)
-
-    def select_hf_model(self, mid):
-        self.hf_model.delete(0, "end")
-        self.hf_model.insert(0, mid)
-
-    def init_or_tab(self):
-        self.tab_or.grid_columnconfigure(0, weight=1)
-        self.tab_or.grid_rowconfigure(2, weight=1)
-
-        # API Key
-        row1 = ctk.CTkFrame(self.tab_or, fg_color="transparent")
-        row1.grid(row=0, column=0, sticky="ew", padx=10, pady=5)
-        ctk.CTkLabel(row1, text="API Key:").pack(side="left")
-        self.or_key = ctk.CTkEntry(row1, width=250, show="*")
-        self.or_key.insert(0, self.session.engine.api_key or "")
-        self.or_key.pack(side="left", padx=10, fill="x", expand=True)
-        
-        # Tools
-        row2 = ctk.CTkFrame(self.tab_or, fg_color="transparent")
-        row2.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
-        ctk.CTkButton(row2, text="Fetch Available Models", command=self.fetch_or_models).pack(side="left")
-        
-        self.var_show_paid = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(row2, text="Show Paid Models", variable=self.var_show_paid, 
-                        command=self.fetch_or_models).pack(side="left", padx=10)
-        self.or_image_only_var = ctk.BooleanVar(value=self.session.engine.openrouter_image_models_only)
-        ctk.CTkCheckBox(
-            row2,
-            text="List image models only",
-            variable=self.or_image_only_var,
-            command=lambda: (
-                self._persist_image_filter_preference("openrouter_image_models_only", self.or_image_only_var.get()),
-                self.show_or_results(self._or_models_cache, update_cache=False)
-            ),
-        ).pack(side="left", padx=10)
-        
-        # List
-        self.or_list = ctk.CTkScrollableFrame(self.tab_or, label_text="OpenRouter Vision Models")
-        self.or_list.grid(row=2, column=0, sticky="nsew", padx=10, pady=5)
-
-        # Header
-        header_text = f"{'Model ID':<40} | {'Capability':^15} | {'Cost':>15}"
-        ctk.CTkLabel(
-            self.or_list, 
-            text=header_text, 
-            font=("Courier New", 12, "bold"),
-            text_color="gray",
-            anchor="w"
-        ).pack(fill="x", pady=(5, 10), padx=5)
-
-        # Selection
-        row4 = ctk.CTkFrame(self.tab_or, fg_color="transparent")
-        row4.grid(row=3, column=0, sticky="ew", padx=10, pady=(5,20))
-        ctk.CTkLabel(row4, text="Selected:").pack(side="left")
-        self.or_model = ctk.CTkEntry(row4, width=300)
-        self.or_model.insert(0, self.session.engine.model_id or "openai/gpt-4-vision-preview")
-        self.or_model.pack(side="left", padx=10, fill="x", expand=True)
-        ctk.CTkButton(row4, text="Save Config", command=self.save_or).pack(side="right")
-
-    def fetch_or_models(self):
-        # Clear including header
-        for w in self.or_list.winfo_children():
-            w.destroy()
-        
-        # Restore header
-        header_text = f"{'Model ID':<40} | {'Capability':^15} | {'Cost':>15}"
-        ctk.CTkLabel(
-            self.or_list, 
-            text=header_text, 
-            font=("Courier New", 12, "bold"),
-            text_color="gray",
-            anchor="w"
-        ).pack(fill="x", pady=(5, 10), padx=5)
-
-        ctk.CTkLabel(self.or_list, text="Fetching...", text_color="gray").pack()
-        
-        def worker():
-            try:
-                from src.core import openrouter_utils
-                # We can't really filter by 'task' in the same way, but OR utils handles 'image' modality check
-                model_ids, _ = openrouter_utils.find_models_by_task(
-                    "image-to-text", 
-                    limit=100,
-                    include_paid=self.var_show_paid.get()
-                )
-                models = [{"id": mid, "capability": "Vision", "cost": "Unknown"} for mid in model_ids]
-                self.after(0, lambda: self.show_or_results(models) if self.winfo_exists() else None)
-            except Exception as e:
-                error_msg = str(e)
-                self.after(0, lambda: self.show_or_results([], error=error_msg) if self.winfo_exists() else None)
-        
-        # Use submit_replacing so rapid fetches only execute the final one
-        self._worker.submit_replacing("or_fetch", worker)
-
-    def show_or_results(self, results, error=None, update_cache=True):
-        if update_cache:
-            self._or_models_cache = list(results or [])
-        raw_results = list(self._or_models_cache)
-        results = self._filter_image_models(raw_results, self.or_image_only_var.get())
-
-        # Clear list but keep header? Actually cleaner to clear and redraw header in one go if I had separate method, 
-        # but here I cleared children in fetch.
-        # Let's just clear and redraw header to be safe
-        for w in self.or_list.winfo_children():
-            w.destroy()
-        
-        header_text = f"{'Model ID':<40} | {'Capability':^15} | {'Cost':>15}"
-        ctk.CTkLabel(
-            self.or_list, 
-            text=header_text, 
-            font=("Courier New", 12, "bold"),
-            text_color="gray",
-            anchor="w"
-        ).pack(fill="x", pady=(5, 10), padx=5)
-
-        if error:
-            ctk.CTkLabel(self.or_list, text=f"Error: {error}\n(Check internet?)", text_color="red").pack()
-            return
-        
-        if not raw_results:
-            ctk.CTkLabel(self.or_list, text="No generic vision models found.").pack()
-            return
-        if not results:
-            ctk.CTkLabel(self.or_list, text="No image-capable OpenRouter models matched the current filter.").pack()
-            return
-             
-        for item in results:
-             mid = item.get("id", "")
-             capability = item.get("capability", "Vision")
-             cost_str = item.get("cost", "Unknown")
-              
-             display_text = f"{mid:<40} | {capability:^15} | {cost_str:>15}"
-
-             btn = ctk.CTkButton(
-                 self.or_list, 
-                 text=display_text, 
-                 font=("Courier New", 12),
-                 fg_color="transparent", 
-                 border_width=1, 
-                 anchor="w", 
-                 command=lambda m=mid: self.select_or_model(m)
-             )
-             btn.pack(fill="x", pady=2)
-
-    def select_or_model(self, mid):
-        self.or_model.delete(0, "end")
-        self.or_model.insert(0, mid)
-
-    def save_hf(self):
-        model_id = self.hf_model.get()
-        if not self.validate_model_id(model_id, "huggingface"):
-            return
-
-        self.session.engine.provider = "huggingface"
-        self.session.engine.api_key = self.hf_key.get().strip()
-        self.session.engine.model_id = model_id
-        
-        # Try to infer task or default to image-to-text for multi-modal
-        # Classification models often have 'vit', 'resnet', 'siglip' but no 'caption' or 'desc'
-        if any(x in model_id.lower() for x in ["vit-base-patch", "resnet-", "siglip-", "bits-"]):
-             self.session.engine.task = "image-classification"
-        else:
-             self.session.engine.task = "image-to-text"
-             
-        self._apply_config()
-
-        # Persist the engine configuration immediately (matches other providers)
-        try:
-            from src.utils.config_manager import save_config
-            save_config(self.session)
-        except Exception as e:
-            logger.error(f"Error saving Hugging Face config: {e}")
-
-    def save_or(self):
-        model_id = self.or_model.get().strip()
-        
-        # Validation
-        from src.core import openrouter_utils
-        if not openrouter_utils.validate_model_id(model_id):
-            import tkinter.messagebox as mb
-            if not mb.askyesno("Invalid Model ID", 
-                               f"The model ID '{model_id}' was not found in the OpenRouter registry.\n\n"
-                               "If this is a new model, you can proceed, but it may fail.\n"
-                               "Do you want to proceed anyway?"):
-                return
-
-        if not self.validate_model_id(model_id, "openrouter"):
-            return
-
-        self.session.engine.provider = "openrouter"
-        self.session.engine.api_key = self.or_key.get().strip()
-        self.session.engine.model_id = model_id
-        # OpenRouter is primarily chat/generation -> image-to-text task in our logical mapping
-        # But could be zero-shot if we prompt it right. For now, default to image-to-text (captioning/describe)
-        self.session.engine.task = "image-to-text" 
-        self._apply_config()
-
-        # Persist the engine configuration immediately (matches other providers)
-        try:
-            from src.utils.config_manager import save_config
-            save_config(self.session)
-        except Exception as e:
-            logger.error(f"Error saving OpenRouter config: {e}")
-
-
-
 
 class DownloadManagerDialog(ctk.CTkToplevel):
     """
     Dedicated modal for browsing and downloading models for local use.
-    
+
     This dialog interfaces with both the Hugging Face Hub (search) and the
     local filesystem (model caching). It provides real-time download progress
     via a background worker.
     """
-    """Separate dialog for browsing Hub and downloading models."""
-    
+
     def __init__(self, parent, session, local_tab=None):
         super().__init__(parent)
         self.parent = parent
@@ -2112,28 +336,25 @@ class DownloadManagerDialog(ctk.CTkToplevel):
         self.search_filter_var = ctk.StringVar(value="multimodal")
         self.title("Download Models from Hugging Face Hub")
         self.geometry("800x600")
-        
+
         # Background worker for thread management (single persistent thread)
         self._worker = BackgroundWorker(name="DownloadManagerWorker")
-        
+
         # Make the dialog modal or at least ensuring it stays on top
         self.transient(parent)
         self.grab_set()
-        
+
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(3, weight=1)
 
         # Search header
         header = ctk.CTkFrame(self)
         header.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
-        
-        # Task dropdown removed to simplify for average user - focusing on multi-modal
-        self.task_var = ctk.StringVar(value="image-to-text")
-        
+
         self.search_entry = ctk.CTkEntry(header, placeholder_text="Search multi-modal models (e.g. 'blip', 'vit', 'qwen')...", width=350)
         self.search_entry.pack(side="left", padx=5, fill="x", expand=True)
         self.search_entry.bind("<Return>", lambda e: self.start_search())
-        
+
         ctk.CTkButton(header, text="Search Hub", command=self.start_search, width=120).pack(side="left", padx=5)
 
         filter_row = ctk.CTkFrame(self)
@@ -2175,25 +396,25 @@ class DownloadManagerDialog(ctk.CTkToplevel):
         # Results area
         self.results_frame = ctk.CTkScrollableFrame(self, label_text="Hugging Face Hub Results")
         self.results_frame.grid(row=3, column=0, sticky="nsew", padx=10, pady=5)
-        
+
         # Add a header label
         header_text = f"{'Model ID':<40} | {'Capability':^15} | {'Size':>10}"
         self.results_header = ctk.CTkLabel(
-            self.results_frame, 
-            text=header_text, 
+            self.results_frame,
+            text=header_text,
             font=("Courier New", 12, "bold"),
             text_color="gray",
             anchor="w"
         )
         self.results_header.pack(fill="x", pady=(5, 10), padx=5)
-        
+
         # Status footer
         self.footer = ctk.CTkFrame(self)
         self.footer.grid(row=4, column=0, sticky="ew", padx=10, pady=10)
-        
+
         self.lbl_status = ctk.CTkLabel(self.footer, text="Enter a query and click Search", text_color="gray")
         self.lbl_status.pack(side="left", padx=5)
-        
+
         self.progress = ctk.CTkProgressBar(self.footer)
         self.progress.pack(side="right", padx=10, fill="x", expand=True)
         self.progress.set(0)
@@ -2274,15 +495,17 @@ class DownloadManagerDialog(ctk.CTkToplevel):
             self.after(0, lambda: self._show_prefetch_results(list(unique)) if self.winfo_exists() else None)
 
             from src.utils.concurrency import DaemonThreadPoolExecutor as ThreadPoolExecutor
+
             def fetch_size(item):
                 try:
-                	sz = huggingface_utils.get_remote_model_size(item["id"])
-                	item["size_bytes"] = sz
-                	item["size_str"] = huggingface_utils.format_size(sz)
+                    sz = huggingface_utils.get_remote_model_size(item["id"])
+                    item["size_bytes"] = sz
+                    item["size_str"] = huggingface_utils.format_size(sz)
                 except Exception:
-                	item["size_bytes"] = 0
-                	item["size_str"] = "Unknown"
+                    item["size_bytes"] = 0
+                    item["size_str"] = "Unknown"
                 return item
+
             with ThreadPoolExecutor(max_workers=10) as executor:
                 results = list(executor.map(fetch_size, unique))
             self.after(0, lambda: self._show_prefetch_results(results) if self.winfo_exists() else None)
@@ -2297,10 +520,10 @@ class DownloadManagerDialog(ctk.CTkToplevel):
         self.lbl_status.configure(text=f"Searching Hub for {search_filter} models...")
         self._search_results_cache = []
         self._reset_size_filter()
-        
+
         for widget in self.results_frame.winfo_children():
             widget.destroy()
-        
+
         # Use submit_replacing so rapid searches only execute the final one
         self._worker.submit_replacing("search", self._search_worker, query, search_filter)
 
@@ -2316,7 +539,7 @@ class DownloadManagerDialog(ctk.CTkToplevel):
                 "multimodal": ["image-text-to-text", "visual-question-answering", config.MODEL_TASK_IMAGE_TO_TEXT],
             }
             tasks = filter_tasks.get(search_filter, filter_tasks["multimodal"])
-            
+
             all_results = []
             for t in tasks:
                 models = list_models(
@@ -2331,7 +554,7 @@ class DownloadManagerDialog(ctk.CTkToplevel):
                         'task': t,
                         'capability': huggingface_utils.get_model_capability(t)
                     })
-            
+
             # Deduplicate by ID, keeping the first task found
             seen = set()
             unique_results = []
@@ -2339,10 +562,7 @@ class DownloadManagerDialog(ctk.CTkToplevel):
                 if r['id'] not in seen:
                     unique_results.append(r)
                     seen.add(r['id'])
-            
-            # Note: suitability filtering happens on select/download, not here —
-            # the download manager shows ALL Hub models so the user can browse.
-            
+
             # Show models immediately with placeholder sizes, then fetch sizes
             # in background so the user can see results right away.
             for item in unique_results:
@@ -2351,6 +571,7 @@ class DownloadManagerDialog(ctk.CTkToplevel):
             self.after(0, lambda: self.show_search_results(list(unique_results)) if self.winfo_exists() else None)
 
             from src.utils.concurrency import DaemonThreadPoolExecutor as ThreadPoolExecutor
+
             def fetch_size(item):
                 try:
                     sz = huggingface_utils.get_remote_model_size(item['id'])
@@ -2360,6 +581,7 @@ class DownloadManagerDialog(ctk.CTkToplevel):
                     item['size_bytes'] = 0
                     item['size_str'] = "Unknown"
                 return item
+
             with ThreadPoolExecutor(max_workers=10) as executor:
                 results_with_details = list(executor.map(fetch_size, unique_results))
             self.after(0, lambda: self.show_search_results(results_with_details, refresh_size_filter=False) if self.winfo_exists() else None)
@@ -2384,12 +606,12 @@ class DownloadManagerDialog(ctk.CTkToplevel):
         ctk.CTkLabel(self.results_frame, text=header_text, font=("Courier New", 12, "bold"), text_color="gray", anchor="w").pack(fill="x", pady=(5, 10), padx=5)
 
         if not self._search_results_cache:
-             ctk.CTkLabel(self.results_frame, text="No models found matching your query.", text_color="gray").pack(pady=20)
-             return
+            ctk.CTkLabel(self.results_frame, text="No models found matching your query.", text_color="gray").pack(pady=20)
+            return
         if not filtered_results:
-             ctk.CTkLabel(self.results_frame, text="No models match the current size filter.", text_color="gray").pack(pady=20)
-             return
-             
+            ctk.CTkLabel(self.results_frame, text="No models match the current size filter.", text_color="gray").pack(pady=20)
+            return
+
         for item in filtered_results:
             self.add_result_item(item['id'], item['size_str'], item['capability'])
 
@@ -2449,58 +671,48 @@ class DownloadManagerDialog(ctk.CTkToplevel):
     def add_result_item(self, model_id, size_str, capability):
         frame = ctk.CTkFrame(self.results_frame)
         frame.pack(fill="x", pady=2, padx=5)
-        
+
         # Consistent column-like look
         display_text = f"{model_id:<40} | {capability:^15} | {size_str:>10}"
-        
+
         ctk.CTkLabel(
-            frame, 
-            text=display_text, 
-            font=("Courier New", 12), 
+            frame,
+            text=display_text,
+            font=("Courier New", 12),
             anchor="w"
         ).pack(side="left", padx=10, fill="x", expand=True)
-        
+
         # Buttons
-        btn_test = ctk.CTkButton(frame, text="Test via API", width=100, fg_color="#3B8ED0", 
-                                 command=lambda m=model_id: self.test_via_api(m))
-        btn_test.pack(side="right", padx=5)
-        
+        btn_select = ctk.CTkButton(frame, text="Select", width=100, fg_color="#3B8ED0",
+                                   command=lambda m=model_id: self.select_remote_model(m))
+        btn_select.pack(side="right", padx=5)
+
         btn_download = ctk.CTkButton(frame, text="Download", width=100, fg_color="#2FA572",
                                      command=lambda m=model_id: self.start_download(m))
         btn_download.pack(side="right", padx=5)
 
-    def test_via_api(self, model_id):
-        # Try to select the model in the local tab (or HF tab if opened from Step2Tagging)
+    def select_remote_model(self, model_id):
+        """Select a Hub model for local inference without downloading it."""
         local_tab = self.local_tab
-        if local_tab is None:
-            self.lbl_status.configure(text="Cannot switch tabs from this context.", text_color="red")
+        if local_tab is None or not hasattr(local_tab, 'local_model_var'):
+            self.lbl_status.configure(text="Cannot select model from this context.", text_color="red")
             return
-        # If local_tab is the LocalProviderTab, set model directly
-        if hasattr(local_tab, 'local_model_var'):
-            local_tab.local_model_var.set(model_id)
-            if hasattr(local_tab, 'select_local_model'):
-                local_tab.select_local_model()
-            self.lbl_status.configure(text=f"Selected {model_id} for local inference.", text_color="green")
-        elif hasattr(local_tab, 'engine_var'):
-            # Opened from Step2Tagging
-            local_tab.engine_var.set("huggingface")
-            local_tab.hf_model.delete(0, "end")
-            local_tab.hf_model.insert(0, model_id)
-            self.lbl_status.configure(text=f"Selected {model_id} for API testing.", text_color="green")
-        else:
-            self.lbl_status.configure(text="Cannot switch tabs from this context.", text_color="red")
+        local_tab.local_model_var.set(model_id)
+        if hasattr(local_tab, 'select_local_model'):
+            local_tab.select_local_model(model_id)
+        self.lbl_status.configure(text=f"Selected {model_id} for local inference.", text_color="green")
 
     def start_download(self, model_id):
         self.lbl_status.configure(text=f"Preparing download for {model_id}...", text_color="gray")
         self.progress.set(0)
-        
+
         self.download_queue = queue.Queue()
         self._worker.submit(
             self._prepare_and_download_model,
-            model_id, 
+            model_id,
             self.download_queue
         )
-        
+
         self.poll_download_queue()
 
     def _prepare_and_download_model(self, model_id, download_queue):
@@ -2529,20 +741,20 @@ class DownloadManagerDialog(ctk.CTkToplevel):
             while True:
                 msg_type, data = self.download_queue.get_nowait()
                 _logger.info(f"[DownloadManager] Queue message: {msg_type} (data={data!r:.200})" if isinstance(data, str) else f"[DownloadManager] Queue message: {msg_type}")
-                
+
                 if msg_type == "model_download_progress":
                     downloaded, total = data
                     if total > 0:
                         self.progress.set(downloaded / total)
-                
+
                 elif msg_type == "status_update":
                     self.lbl_status.configure(text=data, text_color="gray")
-                
+
                 elif msg_type == "download_complete":
                     _logger.info(f"[DownloadManager] Download complete: {data}")
                     self.on_download_complete(data)
                     return
-                
+
                 elif msg_type == "incompatible_model":
                     model_id, reason = data
                     self.lbl_status.configure(text=f"Cannot download {model_id}: {reason}", text_color="red")
@@ -2558,8 +770,8 @@ class DownloadManagerDialog(ctk.CTkToplevel):
 
                 elif msg_type == "error":
                     self.lbl_status.configure(text=f"Download failed: {data}", text_color="red")
-                    return # Stop polling
-                    
+                    return  # Stop polling
+
         except queue.Empty:
             # Continue polling if not closed
             if self.winfo_exists():
@@ -2568,11 +780,11 @@ class DownloadManagerDialog(ctk.CTkToplevel):
     def on_download_complete(self, model_id):
         self.lbl_status.configure(text=f"Download complete: {model_id}!", text_color="green")
         self.progress.set(1.0)
-        
+
         # Auto-select the downloaded model for local inference
         self.session.engine.provider = "local"
         self.session.engine.model_id = model_id
-        
+
         # Try to set the appropriate task based on model info
         try:
             from src.core import huggingface_utils
@@ -2584,14 +796,14 @@ class DownloadManagerDialog(ctk.CTkToplevel):
         except Exception as e:
             logger.warning(f"Could not determine task for {model_id}: {e}")
             self.session.engine.task = "image-to-text"  # Default fallback
-        
+
         # Refresh local tab cache and update selection
         if self.local_tab is not None:
             if hasattr(self.local_tab, 'refresh_local_cache'):
                 self.local_tab.refresh_local_cache()
             if hasattr(self.local_tab, 'local_model_var'):
                 self.local_tab.local_model_var.set(model_id)
-    
+
     def destroy(self):
         """Override destroy to clean up worker thread."""
         if hasattr(self, '_worker'):

@@ -52,58 +52,11 @@ from PIL import Image
 # Internal modules
 from .session import Session
 from . import huggingface_utils
-from . import openrouter_utils
 from . import image_processing
 from . import config
 from src.utils.concurrency import DaemonThreadPoolExecutor
 from . import keyword_scoring
 from . import keyword_scoring_adapters
-
-# Optional Groq integration (for Groq SDK-based inference)
-try:
-    from src.integrations.groq_package_client import GroqPackageClient, GroqVisionClientAdapter
-
-    GROQ_AVAILABLE = True
-except ImportError:
-    GroqPackageClient = None
-    GroqVisionClientAdapter = None
-    GROQ_AVAILABLE = False
-
-# Optional Ollama integration (official client with host config)
-try:
-    from src.integrations.ollama_client import OllamaClient
-
-    OLLAMA_AVAILABLE = True
-except ImportError:
-    OllamaClient = None
-    OLLAMA_AVAILABLE = False
-
-# Optional Nvidia integration
-try:
-    from src.integrations.nvidia_client import NvidiaClient
-
-    NVIDIA_AVAILABLE = True
-except ImportError:
-    NvidiaClient = None
-    NVIDIA_AVAILABLE = False
-
-# Optional Google AI Studio integration
-try:
-    from src.integrations.google_ai_client import GoogleAIClient
-
-    GOOGLE_AI_AVAILABLE = True
-except ImportError:
-    GoogleAIClient = None
-    GOOGLE_AI_AVAILABLE = False
-
-# Optional Cerebras Inference integration
-try:
-    from src.integrations.cerebras_client import CerebrasClient
-
-    CEREBRAS_AVAILABLE = True
-except ImportError:
-    CerebrasClient = None
-    CEREBRAS_AVAILABLE = False
 
 # Optional metadata verification (for testing/debugging)
 # This module may not be available in packaged distributions
@@ -126,7 +79,7 @@ class ProcessingManager:
     This class manages the entire processing workflow in a background thread,
     allowing the UI to remain responsive. It coordinates between:
     - Data source (local files or Daminion)
-    - AI engine (local models or cloud APIs)
+    - AI engine (local LFM models)
     - Metadata writing (EXIF/IPTC or Daminion API)
 
     The processing runs asynchronously and can be aborted by the user at any time.
@@ -304,73 +257,20 @@ class ProcessingManager:
             )
 
             # ================================================================
-            # STAGE 1: INITIALIZE MODEL / API CLIENT — done once before loop
+            # STAGE 1: INITIALIZE MODEL — done once before loop
             # ================================================================
-            self._api_client = None  # Will hold the reusable API client
             engine = self.session.engine
 
-            if engine.provider == "openrouter":
-                # Reusable OpenRouter vision client; tier 1 (logprobs) and
-                # tier 3 (semantic JSON) scoring share it with regular tagging.
-                self._api_client = openrouter_utils.OpenRouterClient(
-                    token=lambda: engine.api_key or None
+            if engine.provider != "local":
+                # Synapic tags images with local models (LFM) only.
+                self.logger.warning(
+                    f"Engine provider '{engine.provider}' is not supported; "
+                    "forcing local inference."
                 )
-                self.logger.info("OpenRouter client initialized (reused for all items)")
-            elif engine.provider == "local":
-                self._init_local_model()
-            elif engine.provider == "groq_package":
-                if not GROQ_AVAILABLE:
-                    raise RuntimeError(
-                        "Groq SDK not available. Please install it with: pip install groq"
-                    )
-                # The key is passed directly to the client constructor below;
-                # never write it to os.environ (it would leak to child
-                # processes and /proc/<pid>/environ).
-                groq_api_key = engine.groq_api_key
-                self._api_client = GroqPackageClient(api_key=groq_api_key)
-                if not self._api_client.is_available():
-                    raise RuntimeError(
-                        "Groq SDK is not available or not properly configured."
-                    )
-                self.logger.info("Groq client initialized (reused for all items)")
-            elif engine.provider == "ollama":
-                if not OLLAMA_AVAILABLE:
-                    raise RuntimeError(
-                        "Ollama client not available. Please install 'ollama' package."
-                    )
-                self._api_client = OllamaClient(
-                    host=engine.ollama_host, api_key=engine.ollama_api_key
-                )
-                if not self._api_client.is_available():
-                    raise RuntimeError("Ollama client could not be initialized.")
-                self.logger.info("Ollama client initialized (reused for all items)")
-            elif engine.provider == "nvidia":
-                if not NVIDIA_AVAILABLE:
-                    raise RuntimeError("Nvidia client not available.")
-                self._api_client = NvidiaClient(api_key=engine.nvidia_api_key)
-                if not self._api_client.is_available():
-                    raise RuntimeError("Nvidia API key not configured.")
-                self.logger.info("Nvidia client initialized (reused for all items)")
-            elif engine.provider == "google_ai":
-                if not GOOGLE_AI_AVAILABLE:
-                    raise RuntimeError("Google AI client not available.")
-                self._api_client = GoogleAIClient(api_key=engine.google_ai_api_key)
-                if not self._api_client.is_available():
-                    raise RuntimeError("Google AI API key not configured.")
-                self.logger.info("Google AI client initialized (reused for all items)")
-            elif engine.provider == "cerebras":
-                if not CEREBRAS_AVAILABLE:
-                    raise RuntimeError(
-                        "Cerebras SDK not available. "
-                        "Please install it with: pip install cerebras_cloud_sdk"
-                    )
-                self._api_client = CerebrasClient(api_key=engine.cerebras_api_key)
-                if not self._api_client.is_available():
-                    raise RuntimeError(
-                        self._api_client.availability_error()
-                        or "Cerebras client is unavailable."
-                    )
-                self.logger.info("Cerebras client initialized (reused for all items)")
+                engine.provider = "local"
+                engine.model_id = ""
+
+            self._init_local_model()
 
             # ================================================================
             # STAGE 2: PAGINATED FETCH + PROCESS LOOP
@@ -553,14 +453,10 @@ class ProcessingManager:
                 # ============================================================
                 # PROCESS EACH ITEM IN THIS PAGE
                 # ============================================================
-                # Cloud API providers are network-bound, so process items in
-                # parallel (config.PROCESSING_MAX_WORKERS). Local GPU/CPU
-                # inference stays sequential (max_workers=1).
-                max_workers = (
-                    1
-                    if self.session.engine.provider == "local"
-                    else getattr(config, "PROCESSING_MAX_WORKERS", 4)
-                )
+                # Local GPU/CPU inference is sequential (max_workers=1) — the
+                # model lives in the worker process and would thrash under
+                # concurrent calls from multiple threads.
+                max_workers = 1
                 executor = (
                     DaemonThreadPoolExecutor(max_workers=max_workers)
                     if max_workers > 1
@@ -775,16 +671,6 @@ class ProcessingManager:
                     except ImportError:
                         pass
 
-            # Close API client to free connection pools / HTTP sessions
-            if self._api_client is not None:
-                self.logger.info("Closing API client and freeing connection pools")
-                if hasattr(self._api_client, "close"):
-                    try:
-                        self._api_client.close()
-                    except Exception:
-                        pass
-                self._api_client = None
-
             # Force garbage collection after all cleanup
             gc.collect()
             self.log("Memory cleanup completed.")
@@ -799,13 +685,6 @@ class ProcessingManager:
             # Ensure cleanup even on failure
             if hasattr(self, "model") and self.model:
                 self.model = None
-            if hasattr(self, "_api_client") and self._api_client:
-                if hasattr(self._api_client, "close"):
-                    try:
-                        self._api_client.close()
-                    except Exception:
-                        pass
-                self._api_client = None
             gc.collect()
         finally:
             self.session.is_processing = False
@@ -1021,52 +900,6 @@ class ProcessingManager:
             return
         self._process_single_item(item)
 
-    def _score_keywords_cloud(self, engine, path: str, mode: str):
-        """Run the keyword-scoring ladder for cloud vision providers.
-
-        Builds the tier-1 (logprob) and tier-3 (vision chat) clients for the
-        configured provider and delegates to the shared orchestrator. Provider
-        construction failures raise; the caller degrades per the "hide on
-        failure" contract shared with local scoring.
-        """
-        logprob_factory = None
-        vision_factory = None
-
-        if engine.provider == "groq_package":
-            groq_client = self._api_client
-            if groq_client is None:
-                raise RuntimeError("Groq client not initialized for scoring")
-            model_id = (
-                engine.model_id or "meta-llama/llama-4-scout-17b-16e-instruct"
-            )
-
-            def logprob_factory():
-                # Pick up the current (possibly rotated) key, mirroring the
-                # per-item refresh the regular tagging path performs.
-                groq_client.api_key = engine.groq_api_key
-                return groq_client, model_id
-
-            def vision_factory():
-                return GroqVisionClientAdapter(groq_client, engine), model_id
-        elif engine.provider == "openrouter":
-            openrouter_client = self._api_client
-            if openrouter_client is None:
-                raise RuntimeError("OpenRouter client not initialized for scoring")
-
-            def logprob_factory():
-                return openrouter_client, engine.model_id
-
-            def vision_factory():
-                return openrouter_client, engine.model_id
-
-        return keyword_scoring_adapters.score_keywords(
-            engine,
-            path,
-            mode=mode,
-            logprob_client_factory=logprob_factory,
-            vision_client_factory=vision_factory,
-        )
-
     def _process_single_item(self, item):
         """
         Process a single image item through the complete AI tagging pipeline.
@@ -1170,10 +1003,7 @@ class ProcessingManager:
             # ===============================================================
             # STAGE 2: AI INFERENCE
             # ===============================================================
-            # Run the image through the AI model to generate tags
-            # The inference method depends on the configured provider:
-            # - 'local': Use locally loaded model (self.model)
-            # - 'huggingface'/'openrouter': Call API endpoint
+            # Run the image through the locally loaded AI model (LFM-only).
 
             # Tagging mode: 'llm', 'probability', or 'both'.
             # Legacy configs only persist probability_enabled -> map True to 'both'.
@@ -1241,64 +1071,8 @@ class ProcessingManager:
 
             result = None
 
-            # Cloud keyword scoring (tier 1 calibrated logprobs, or tier 3
-            # semantic JSON fallback). Local scoring ran above; this block
-            # gives cloud vision providers the same probability pass.
-            if (
-                score_result is None
-                and engine.provider in ("groq_package", "openrouter")
-                and mode != "llm"
-            ):
-                try:
-                    score_result = self._score_keywords_cloud(
-                        engine, str(path), mode
-                    )
-                    if score_result is not None:
-                        prob_dict = score_result.score_map
-                        if (
-                            score_result.tier
-                            == keyword_scoring_adapters.SCORING_TIER.UNAVAILABLE
-                            and all(score == 0.0 for score in prob_dict.values())
-                        ):
-                            # Scoring did not run: surface the reason and
-                            # continue with an empty map so the legacy
-                            # probability-only LLM fallback applies.
-                            for note in score_result.notes:
-                                self.logger.warning(
-                                    f"Cloud probability scoring unavailable: {note}"
-                                )
-                            score_result = None
-                            prob_dict = {}
-                        else:
-                            threshold = engine.probability_threshold
-                            for candidate, score in prob_dict.items():
-                                passed = threshold <= 0.0 or score >= threshold
-                                self.log(
-                                    f"  {candidate}: {score:.3f} "
-                                    f"{'PASS' if passed else 'FAIL'}"
-                                )
-                            if threshold > 0.0:
-                                prob_dict = {
-                                    k: v for k, v in prob_dict.items()
-                                    if v >= threshold
-                                }
-                                score_result = (
-                                    keyword_scoring.build_thresholded_view(
-                                        score_result, threshold
-                                    )
-                                )
-                except Exception as exc:
-                    # Hide on failure — mirror the local scoring contract.
-                    self.logger.warning(
-                        f"Cloud probability scoring failed ({type(exc).__name__}): {exc}"
-                    )
-                    score_result = None
-                    prob_dict = {}
-
-            probability_only = mode == "probability" and engine.provider in (
-                "local",
-                "groq_package",
-                "openrouter",
+            probability_only = (
+                mode == "probability" and engine.provider == "local"
             )
 
             if probability_only and prob_dict:
@@ -1322,7 +1096,7 @@ class ProcessingManager:
                 probability_only = False
                 # Deliberately fall through to the LLM path below
 
-            if not probability_only and engine.provider == "local":
+            if not probability_only:
                 # ---------------------------------------------------------------
                 # LOCAL INFERENCE (Model loaded in memory)
                 # ---------------------------------------------------------------
@@ -1418,208 +1192,6 @@ class ProcessingManager:
                         if img.mode != "RGB":
                             img = img.convert("RGB")
                         result = self.model(img)
-
-            elif engine.provider == "groq_package":
-                # ---------------------------------------------------------------
-                # GROQ SDK INFERENCE (Cloud-based via Groq Python SDK)
-                # ---------------------------------------------------------------
-                # Uses the reusable Groq client initialized in _run_job()
-                groq_client = self._api_client
-
-                # Update API key if it has rotated
-                groq_client.api_key = engine.groq_api_key
-
-                # Default model for vision tasks (Groq's vision model)
-                model_id = (
-                    engine.model_id or "meta-llama/llama-4-scout-17b-16e-instruct"
-                )
-
-                # Create a detailed prompt for image analysis
-                prompt = (
-                    "Analyze this image and provide a detailed response in JSON format with these keys:\n"
-                    "- 'description': A detailed description of the image content\n"
-                    "- 'category': A single broad category (e.g., 'Nature', 'Architecture', 'People')\n"
-                    "- 'keywords': A list of 5-10 relevant tags/keywords\n\n"
-                    "Return ONLY the raw JSON object, no additional text."
-                )
-
-                # Call Groq API with the image — uses key rotation on quota/rate-limit errors
-                self.logger.info("Using Groq API key rotation")
-                response_text = groq_client.chat_with_image_rotating(
-                    engine_config=engine,
-                    model=model_id,
-                    prompt=prompt,
-                    image_path=str(path),
-                )
-
-                if (
-                    isinstance(response_text, str)
-                    and "Error: All configured Groq API keys have been exhausted"
-                    in response_text
-                ):
-                    self.logger.error(
-                        "Groq API key exhaustion reached. Aborting pipeline."
-                    )
-                    self.log("Groq API quota exhausted. Aborting job.")
-                    # Setting stop_event will halt the main fetch loop
-                    if hasattr(self, "stop_event") and not self.stop_event.is_set():
-                        self.stop_event.set()
-                    # Raising RuntimeError breaks out of this specific item correctly marking it failed,
-                    # and the loop checks stop_event on the next iteration.
-                    raise RuntimeError(
-                        "All Groq API keys have been exhausted for this run cycle."
-                    )
-
-                # Format result to match expected structure for tag extraction
-                result = [{"generated_text": response_text}]
-                del response_text  # Free the original string copy
-
-            elif engine.provider == "ollama":
-                # ---------------------------------------------------------------
-                # OLLAMA INFERENCE (Local or Remote)
-                # ---------------------------------------------------------------
-                # Uses the reusable Ollama client initialized in _run_job()
-                ollama_client = self._api_client
-
-                # Use configured model
-                model_id = engine.model_id or "llama3:latest"
-
-                # Create a detailed prompt for image analysis
-                prompt = (
-                    "Analyze this image and provide a detailed response in "
-                    "JSON format with these keys:\n"
-                    "- 'description': A detailed description of the image content\n"
-                    "- 'category': A single broad category "
-                    "(e.g., 'Nature', 'Architecture', 'People')\n"
-                    "- 'keywords': A list of 5-10 relevant tags/keywords\n\n"
-                    "Return ONLY the raw JSON object, no additional text."
-                )
-
-                # Call Ollama with the image path
-                response_text = ollama_client.chat_with_image(
-                    model_name=model_id, prompt=prompt, image_path=str(path)
-                )
-
-                # Format result to match expected structure for tag extraction
-                result = [{"generated_text": response_text}]
-                del response_text  # Free the original string copy
-
-            elif engine.provider == "nvidia":
-                # ---------------------------------------------------------------
-                # NVIDIA NIM INFERENCE (Cloud-based via Nvidia Integrate API)
-                # ---------------------------------------------------------------
-                # Uses the reusable Nvidia client initialized in _run_job()
-                nvidia_client = self._api_client
-
-                # Use configured model
-                model_id = (
-                    engine.model_id or "mistralai/mistral-large-3-675b-instruct-2512"
-                )
-
-                # Create a detailed prompt for image analysis
-                prompt = (
-                    "Analyze this image and provide a detailed response in "
-                    "JSON format with these keys:\n"
-                    "- 'description': A detailed description of the image content\n"
-                    "- 'category': A single broad category "
-                    "(e.g., 'Nature', 'Architecture', 'People')\n"
-                    "- 'keywords': A list of 5-10 relevant tags/keywords\n\n"
-                    "Return ONLY the raw JSON object, no additional text."
-                )
-
-                # Call Nvidia NIM with the image path
-                response_text = nvidia_client.chat_with_image(
-                    model_name=model_id, prompt=prompt, image_path=str(path)
-                )
-
-                # Format result to match expected structure for tag extraction
-                result = [{"generated_text": response_text}]
-                del response_text  # Free the original string copy
-
-            elif engine.provider == "google_ai":
-                # ---------------------------------------------------------------
-                # GOOGLE AI STUDIO INFERENCE (Cloud-based via Gemini API)
-                # ---------------------------------------------------------------
-                # Uses the reusable Google AI client initialized in _run_job()
-                google_client = self._api_client
-
-                # Use configured model
-                model_id = engine.model_id or "gemini-2.5-flash"
-
-                # Create a detailed prompt for image analysis
-                prompt = (
-                    "Analyze this image and provide a detailed response in "
-                    "JSON format with these keys:\n"
-                    "- 'description': A detailed description of the image content\n"
-                    "- 'category': A single broad category "
-                    "(e.g., 'Nature', 'Architecture', 'People')\n"
-                    "- 'keywords': A list of 5-10 relevant tags/keywords\n\n"
-                    "Return ONLY the raw JSON object, no additional text."
-                )
-
-                # Call Google AI with the image path
-                response_text = google_client.chat_with_image(
-                    model_name=model_id, prompt=prompt, image_path=str(path)
-                )
-
-                # Format result to match expected structure for tag extraction
-                result = [{"generated_text": response_text}]
-                del response_text  # Free the original string copy
-
-            elif engine.provider == "cerebras":
-                # ---------------------------------------------------------------
-                # CEREBRAS INFERENCE (Cloud-based via Cerebras SDK — world's fastest LLM)
-                # ---------------------------------------------------------------
-                # Uses the reusable Cerebras client initialized in _run_job()
-                cerebras_client = self._api_client
-
-                # Use configured model (default: fast 8B model)
-                model_id = engine.model_id or "llama3.1-8b"
-
-                # Create a detailed prompt for image analysis
-                prompt = (
-                    "Analyze this image and provide a detailed response in "
-                    "JSON format with these keys:\n"
-                    "- 'description': A detailed description of the image content\n"
-                    "- 'category': A single broad category "
-                    "(e.g., 'Nature', 'Architecture', 'People')\n"
-                    "- 'keywords': A list of 5-10 relevant tags/keywords\n\n"
-                    "Return ONLY the raw JSON object, no additional text."
-                )
-
-                # Call Cerebras with the image path
-                response_text = cerebras_client.chat_with_image(
-                    model_name=model_id, prompt=prompt, image_path=str(path)
-                )
-
-                # Format result to match expected structure for tag extraction
-                result = [{"generated_text": response_text}]
-                del response_text  # Free the original string copy
-
-            elif engine.provider in ["huggingface", "openrouter"]:
-                # ---------------------------------------------------------------
-                # API INFERENCE (Cloud-based)
-                # ---------------------------------------------------------------
-                # Send image to API endpoint for processing
-                # No local model loading required
-                provider_module = (
-                    huggingface_utils
-                    if engine.provider == "huggingface"
-                    else openrouter_utils
-                )
-
-                # Configure inference parameters
-                params = {"max_new_tokens": 1024}
-                if engine.task == config.MODEL_TASK_ZERO_SHOT:
-                    params["candidate_labels"] = config.DEFAULT_CANDIDATE_LABELS
-
-                result = provider_module.run_inference_api(
-                    model_id=engine.model_id,
-                    image_path=str(path),
-                    task=engine.task,
-                    token=engine.api_key,
-                    parameters=params,
-                )
 
             # ===============================================================
             # STAGE 3: TAG EXTRACTION

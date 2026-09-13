@@ -29,7 +29,7 @@ class LocalProviderTab(ProviderTabBase):
         return "local"
 
     def _get_provider_display_name(self) -> str:
-        return "Local Inference"
+        return "LFM"
 
     def _get_default_model(self) -> str:
         # This will be set when a model is selected

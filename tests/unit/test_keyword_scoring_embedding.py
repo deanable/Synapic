@@ -117,7 +117,7 @@ def _engine(provider="local", task="image-classification"):
 def test_embedding_gate_local_classification_only():
     assert pick_embedding_tier(_engine()) is True
     assert pick_embedding_tier(_engine(task="image-text-to-text")) is False
-    assert pick_embedding_tier(_engine(provider="groq_package")) is False
+    assert pick_embedding_tier(_engine(provider="openrouter")) is False
 
 
 # ---------------------------------------------------------------------------
@@ -252,23 +252,6 @@ def test_orchestrator_successful_tier2_does_not_touch_embedding():
 
     mock_cls.assert_not_called()
     assert result.tier is SCORING_TIER.LABEL_CONFIDENCE
-
-
-def test_orchestrator_cloud_providers_skip_embedding_tier():
-    """Cloud engines go tier 1 -> tier 3; the embedding rescue is local-only."""
-    engine = _engine(provider="groq_package")
-
-    def no_client():
-        return None
-
-    vision = MagicMock()
-    vision.chat_with_image.return_value = '{"cat": 0.6, "dog": 0.4}'
-    result = score_keywords(
-        engine, "img.jpg",
-        logprob_client_factory=no_client,
-        vision_client_factory=lambda: (vision, "m"),
-    )
-    assert result.tier is SCORING_TIER.SEMANTIC_JSON
 
 
 # ---------------------------------------------------------------------------

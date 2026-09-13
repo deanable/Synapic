@@ -92,22 +92,14 @@ class EngineConfig:
     """
     Configuration for the AI tagging engine.
 
-    Supports eight types of providers:
-    1. Local - Run models locally using Hugging Face Transformers
-    2. Hugging Face - Use Hugging Face Inference API (requires API key)
-    3. OpenRouter - Use OpenRouter API for LLM-based tagging (requires API key)
-    4. Groq - Use Groq SDK for fast inference (requires API key)
-    5. Ollama - Access to local or remote Ollama models (requires running Ollama server)
-    6. Nvidia - High-performance inference via NVIDIA NIM (requires API key)
-    7. Google AI - Google Gemini API with free tier (requires API key)
-    8. Cerebras - Ultra-fast LLM inference via Cerebras Cloud (requires API key)
+    Synapic tags images with locally downloaded Foundation Models (LFM) only.
+    Models run through Hugging Face Transformers on the local machine (CPU or
+    CUDA GPU) — there is no cloud provider selection.
 
     Attributes:
-        provider: Engine type - 'local', 'huggingface', 'openrouter',
-                  'groq_package', 'ollama', 'nvidia', 'google_ai', or 'cerebras'
-        model_id: Identifier for the model (e.g., 'Qwen/Qwen2-VL-2B-Instruct')
-        api_key: API key for cloud providers (not used for local/ollama_free)
-        system_prompt: Custom system prompt for LLM-based models
+        provider: Engine type — always 'local'.
+        model_id: Identifier of the local model (e.g., 'Qwen/Qwen2-VL-2B-Instruct').
+        system_prompt: Custom system prompt for vision-language models.
         task: Model task type - 'image-classification', 'zero-shot-image-classification',
               'image-to-text', or 'image-text-to-text'
         device: Inference device for local models - 'cpu' or 'cuda' (GPU)
@@ -116,16 +108,11 @@ class EngineConfig:
             outside the model's label space). First use downloads ~600MB.
         confidence_threshold: Minimum confidence (1-100) for including tags in results
                             Lower = more permissive, Higher = more strict
-        device: Inference device for local models - 'cpu' or 'cuda' (GPU)
     """
 
-    provider: str = "huggingface"  # 'local', 'huggingface', 'openrouter', 'groq_package', 'ollama', 'nvidia', 'google_ai', 'cerebras'
+    provider: str = "local"  # Synapic runs local (LFM) inference only
     model_id: str = ""
-    api_key: str = ""
-    nvidia_api_key: str = ""  # Nvidia NIM API key
-    google_ai_api_key: str = ""  # Google AI Studio (Gemini API) key
-    cerebras_api_key: str = ""  # Cerebras Inference API key
-    system_prompt: str = ""  # For OpenRouter/LLMs
+    system_prompt: str = ""  # Custom system prompt for VLM models
     task: str = "image-to-text"  # Default task
     confidence_threshold: int = (
         50  # Confidence threshold (1-100) for category/keyword filtering
@@ -136,86 +123,6 @@ class EngineConfig:
     probability_candidates: list = field(default_factory=list)
     probability_threshold: float = 0.0
     embedding_rescue_enabled: bool = False  # Opt-in: tier 2.5 CLIP rescue (~600MB download on first use)
-
-    # Groq integration settings (optional)
-    groq_base_url: str = ""  # Base URL for Groq API
-    groq_api_keys: str = (
-        ""  # Newline-separated list of Groq API keys (supports rotation)
-    )
-
-    # Ollama integration settings
-    ollama_host: str = "http://localhost:11434"  # Ollama server host URL
-    ollama_api_key: str = ""  # Ollama API key for authentication
-
-    # Step 2 UI preferences
-    groq_image_models_only: bool = False
-    ollama_image_models_only: bool = False
-    nvidia_image_models_only: bool = False
-    google_ai_image_models_only: bool = False
-    cerebras_image_models_only: bool = False
-    huggingface_image_models_only: bool = False
-    openrouter_image_models_only: bool = False
-
-    # Index for Groq API key rotation (not persisted)
-    groq_current_key_index: int = 0
-
-    # Set of exhausted Groq API keys for the current run cycle (not persisted)
-    groq_exhausted_keys: set = field(default_factory=set)
-
-    def _next_available_key_index(self, start_idx: int) -> Optional[int]:
-        """
-        Return the index of the next non-exhausted Groq key scanning forward
-        from ``start_idx`` (wrapping around). Returns None when every key is
-        exhausted or no keys are configured.
-        """
-        keys = self.get_groq_key_list()
-        if not keys:
-            return None
-        count = len(keys)
-        for offset in range(count):
-            idx = (start_idx + offset) % count
-            if keys[idx] not in self.groq_exhausted_keys:
-                return idx
-        return None
-
-    @property
-    def groq_api_key(self) -> str:
-        """Backward-compatible property returning the currently active Groq API key."""
-        keys = self.get_groq_key_list()
-        if not keys:
-            return ""
-        idx = self._next_available_key_index(self.groq_current_key_index)
-        if idx is None:
-            # All keys exhausted this cycle: fall back to the current rotation
-            # index so callers can surface the exhaustion message.
-            return keys[self.groq_current_key_index % len(keys)]
-        return keys[idx]
-
-    @groq_api_key.setter
-    def groq_api_key(self, value: str):
-        """Backward-compatible setter — sets a single key."""
-        self.groq_api_keys = value
-
-    def get_groq_key_list(self) -> list:
-        """Parse the newline-separated groq_api_keys string into a list of non-empty keys."""
-        if not self.groq_api_keys:
-            return []
-        return [k.strip() for k in self.groq_api_keys.splitlines() if k.strip()]
-
-    def rotate_groq_key(self) -> str:
-        """Advance to the next non-exhausted Groq API key and return it. Returns '' if no keys."""
-        keys = self.get_groq_key_list()
-        if not keys:
-            return ""
-        next_idx = self._next_available_key_index(self.groq_current_key_index + 1)
-        if next_idx is not None:
-            self.groq_current_key_index = next_idx
-        return keys[self.groq_current_key_index]
-
-    def mark_groq_key_exhausted(self, key: str):
-        """Mark a Groq API key as exhausted for the current run cycle."""
-        if key:
-            self.groq_exhausted_keys.add(key)
 
 
 # ============================================================================
@@ -322,15 +229,13 @@ class Session:
         """
         Validate the engine configuration.
 
-        Checks that the selected engine and model are properly configured before
-        a processing job starts, so misconfiguration is surfaced early rather
+        Checks that a local model is selected and downloaded before a
+        processing job starts, so misconfiguration is surfaced early rather
         than failing mid-run. The specific reason for any failure is logged.
 
         Validation rules:
-            - All providers: a non-empty model_id is required.
-            - local: the model must be downloaded to the local cache.
-            - Cloud providers: the relevant API key/credential must be present
-              (Ollama is exempt — it talks to a local/remote server, not a key).
+            - A non-empty model_id is required.
+            - The model must be downloaded to the local cache.
 
         Returns:
             bool: True if the engine configuration is valid, False otherwise.
@@ -341,7 +246,7 @@ class Session:
             f"Validating engine configuration - Provider: {provider}, Model: {engine.model_id}"
         )
 
-        # A model identifier is required for every provider.
+        # A model identifier is required.
         if not engine.model_id or not engine.model_id.strip():
             self.logger.error(
                 f"Engine validation failed: no model selected for provider '{provider}'"
@@ -368,38 +273,12 @@ class Session:
             self.logger.debug("Engine configuration is valid")
             return True
 
-        # Cloud providers each require their own credential. Ollama is exempt:
-        # it connects to a server (ollama_host) rather than using an API key.
-        required_credentials = {
-            "huggingface": engine.api_key,
-            "openrouter": engine.api_key,
-            "groq_package": engine.groq_api_key,
-            "nvidia": engine.nvidia_api_key,
-            "google_ai": engine.google_ai_api_key,
-            "cerebras": engine.cerebras_api_key,
-        }
-
-        if provider in required_credentials:
-            credential = required_credentials[provider]
-            if not credential or not str(credential).strip():
-                self.logger.error(
-                    f"Engine validation failed: missing API key for provider '{provider}'"
-                )
-                return False
-        elif provider == "ollama":
-            if not engine.ollama_host or not engine.ollama_host.strip():
-                self.logger.error(
-                    "Engine validation failed: missing Ollama host URL"
-                )
-                return False
-        else:
-            self.logger.error(
-                f"Engine validation failed: unknown provider '{provider}'"
-            )
-            return False
-
-        self.logger.debug("Engine configuration is valid")
-        return True
+        # Only local inference is supported; anything else can't be validated.
+        self.logger.error(
+            f"Engine validation failed: unknown provider '{provider}' "
+            "(Synapic supports local models only)"
+        )
+        return False
 
     def reset_stats(self):
         """
@@ -419,9 +298,6 @@ class Session:
         self.processed_items = 0
         self.failed_items = 0
         self.results = deque(maxlen=500)  # Bounded: keeps last 500 results
-
-        # Clear exhausted API keys for the new run cycle
-        self.engine.groq_exhausted_keys.clear()
 
         self.logger.info("Session statistics reset complete")
 

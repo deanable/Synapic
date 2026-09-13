@@ -1,6 +1,6 @@
 """
-Keyword Scoring Adapters
-========================
+Keyword Scoring Adapters (Local-only)
+======================================
 
 Tier adapters and the tier selector for arbitrary-user-keyword scoring,
 as specified in ``docs/KEYWORD_SCORING_DESIGN.md``.
@@ -9,18 +9,12 @@ Every adapter returns a :class:`~src.core.keyword_scoring.ScoreResult`
 so downstream code (thresholding, logging, results export) never
 branches on how the scores were produced:
 
-- Tier 1 ``logprob``: prompted VLM classifies the image in one call and
-  the first output token's logprobs are softmaxed over the candidate
-  set (calibrated). Requires a client that can expose token logprobs.
 - Tier 2 ``label_confidence``: delegates to the existing local
   ``run_local_logprob_inference`` path (pipeline per-label confidence,
   NOT calibrated).
 - Tier 2.5 ``embedding``: true CLIP image-text cosine similarities
   (raw embeddings, L2-normalized) softmaxed over the candidate set;
   semantic and prompt-driven, but candidate-set dependent (NOT calibrated).
-- Tier 3 ``semantic_json``: prompted VLM returns JSON probabilities;
-  parsed with ``extract_dict_from_text`` and normalized via
-  ``normalize_json_probabilities`` (NOT calibrated — self-reported).
 
 Failures never raise out of the adapters: they degrade to a tier-0
 ``unavailable_result`` with the reason recorded, matching the
@@ -34,19 +28,11 @@ from src.core.keyword_scoring import (
     SCORING_TIER,
     ScoreResult,
     build_score_result,
-    normalize_json_probabilities,
-    softmax_from_logprobs,
     softmax_from_similarities,
     unavailable_result,
 )
-from src.utils.json_utils import extract_dict_from_text
 
 logger = logging.getLogger(__name__)
-
-# Maximum candidates we will send in a single scoring prompt. Beyond this
-# the single-token classification prompt becomes unreliable (letter keys
-# exhaust / attention dilution) and the JSON payload degrades.
-MAX_PROMPT_CANDIDATES = 26
 
 # Hugging Face model id used for tier 2.5 (CLIP-style image-text similarity).
 # A ~600MB download on first use; loaded lazily and cached.
@@ -56,32 +42,6 @@ EMBEDDING_MODEL_ID = "openai/clip-vit-base-patch32"
 # band, so raw similarities are a poor absolute signal. We record them as
 # notes and softmax with a fixed temperature for the distribution.
 EMBEDDING_TEMPERATURE = 0.01
-
-
-class LogprobChatClient(Protocol):
-    """Minimal protocol for a chat client that can return token logprobs.
-
-    ``chat_with_image_logprobs`` returns a mapping of first-token candidate
-    string -> raw logprob (e.g. ``{"A": -0.12, "B": -2.9}``), or a plain
-    dict when the backend does not support logprobs (callers must handle
-    ``None`` by degrading to tier 3).
-    """
-
-    def chat_with_image_logprobs(
-        self, model_name: str, prompt: str, image_path: str
-    ) -> Optional[Dict[str, float]]: ...
-
-
-class VisionChatClient(Protocol):
-    """Minimal protocol for the existing vision chat clients.
-
-    Matches the ``chat_with_image(model_name/model, prompt, image_path)``
-    shape shared by the Ollama, Nvidia, Google AI, and Cerebras clients;
-    Groq's rotating wrapper is adapted with a small lambda at the call
-    site.
-    """
-
-    def chat_with_image(self, model_name: str, prompt: str, image_path: str) -> str: ...
 
 
 class ImageTextSimilarityScorer(Protocol):
@@ -104,29 +64,32 @@ class ImageTextSimilarityScorer(Protocol):
 def pick_scoring_tier(engine: Any, mode: Optional[str] = None) -> Optional[SCORING_TIER]:
     """Return the highest available scoring tier for this engine config.
 
-    Implements the ladder from the design doc §1:
-
-    1. ``logprob`` — cloud VLM/LLM providers (tier-1 capable clients are
-       gated at call time by the client actually exposing logprobs).
-    2. ``label_confidence`` — local provider with an image-classification
-       pipeline (the existing probability pass).
-    3. ``semantic_json`` — cloud VLM providers without logprob support.
+    Synapic supports local inference only.  Tier 2 (``label_confidence``)
+    is available when the local model is an image-classification pipeline
+    and probability scoring is active.  When the tier selector returns
+    ``None`` no scoring pass runs at all (LLM-only mode, no candidates,
+    or a non-classification local model).
 
     Args:
         engine: ``EngineConfig``.
         mode: Optional pre-normalized tagging mode ('llm' | 'probability'
-            | 'both') as computed by the pipeline. When omitted, the mode
+            | 'both') as computed by the pipeline.  When omitted, the mode
             is derived from the engine with the same legacy rules the
             pipeline uses (``probability_mode`` missing/'llm' plus
             ``probability_enabled=True`` maps to 'both').
 
     Returns ``None`` when scoring cannot run at all (LLM-only mode, no
-    candidates, local non-classification pipeline). ``None`` means "no
+    candidates, local non-classification pipeline).  ``None`` means "no
     scoring pass", distinct from a tier-0 result which means "scoring was
     attempted and failed".
     """
-    provider = str(getattr(engine, "provider", "") or "").lower()
     candidates = getattr(engine, "probability_candidates", None) or []
+
+    # Synapic tags images with local (LFM) models only: any non-local
+    # provider (legacy cloud IDs included) never selects a scoring tier.
+    provider = str(getattr(engine, "provider", "") or "").lower()
+    if provider != "local":
+        return None
 
     if mode is None:
         mode = str(getattr(engine, "probability_mode", "") or "").lower()
@@ -144,29 +107,14 @@ def pick_scoring_tier(engine: Any, mode: Optional[str] = None) -> Optional[SCORI
     if mode == "llm" or not candidates:
         return None
 
-    if provider == "local":
-        task = str(getattr(engine, "task", "") or "")
-        if task == "image-classification":
-            return SCORING_TIER.LABEL_CONFIDENCE
-        # Local VLM could serve tier 1/3 in principle, but the current
-        # local VLM path does not expose per-candidate logprobs and we do
-        # not double-load a caption model just for scoring. Explicitly
-        # unavailable rather than pretending a tier will run.
-        return None
+    task = str(getattr(engine, "task", "") or "")
+    if task == "image-classification":
+        return SCORING_TIER.LABEL_CONFIDENCE
 
-    # Cloud vision providers: all can caption, so tier 3 always exists;
-    # tier 1 is attempted first when the client supports logprobs.
-    if provider in {
-        "groq_package",
-        "openrouter",
-        "ollama",
-        "nvidia",
-        "google_ai",
-        "cerebras",
-        "huggingface",
-    }:
-        return SCORING_TIER.LOGPROB
-
+    # Local VLM could serve tier 2 in principle, but the current local VLM
+    # path does not expose per-candidate label confidence and we do not
+    # double-load a caption model just for scoring.  Explicitly unavailable
+    # rather than pretending a tier will run.
     return None
 
 
@@ -200,96 +148,6 @@ def pick_embedding_tier(engine: Any) -> bool:
         return False
     task = str(getattr(engine, "task", "") or "")
     return task == "image-classification"
-
-
-# ---------------------------------------------------------------------------
-# Tier 1 — logprob classification (calibrated)
-# ---------------------------------------------------------------------------
-
-
-def _build_classification_prompt(candidates: List[str]) -> str:
-    """Method 1 prompt standard: single option token, nothing else."""
-    lines = [
-        "Analyze the provided image and classify it into one of the following options:",
-    ]
-    for letter, candidate in zip("ABCDEFGHIJKLMNOPQRSTUVWXYZ", candidates):
-        lines.append(f"{letter}) {candidate}")
-    lines.append("")
-    lines.append(
-        "Respond with ONLY the single option letter ("
-        + ", ".join("ABCDEFGHIJKLMNOPQRSTUVWXYZ"[: len(candidates)])
-        + ") corresponding to your choice. Do not include any other text, "
-        "reasoning, or punctuation."
-    )
-    return "\n".join(lines)
-
-
-def _letters_to_candidates(
-    logprob_map: Dict[str, float], candidates: List[str]
-) -> Dict[str, float]:
-    """Re-key letter logprobs onto candidate strings; unknown letters dropped."""
-    letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[: len(candidates)]
-    mapping = dict(zip(letters, candidates))
-    rekeyed: Dict[str, float] = {}
-    for token, logprob in logprob_map.items():
-        letter = str(token).strip().upper()
-        candidate = mapping.get(letter)
-        if candidate is not None and candidate not in rekeyed:
-            rekeyed[candidate] = float(logprob)
-    return rekeyed
-
-
-def score_keywords_logprob(
-    client: LogprobChatClient,
-    model_name: str,
-    image_path: str,
-    candidates: List[str],
-) -> ScoreResult:
-    """Tier 1: softmax first-token logprobs into a calibrated distribution.
-
-    Raises:
-        ValueError: when the client does not support logprobs (returns
-            ``None``) — the caller decides whether to fall back to tier 3.
-        RuntimeError: for client failures; caught by the pipeline and
-            degraded to tier 0 there. Also raised here when the candidate
-            list exceeds :data:`MAX_PROMPT_CANDIDATES` (use tier 3 for
-            large candidate sets).
-    """
-    if not candidates:
-        return unavailable_result("No candidate keywords supplied.", candidates)
-
-    if len(candidates) > MAX_PROMPT_CANDIDATES:
-        raise RuntimeError(
-            f"{len(candidates)} candidates exceed the logprob prompt limit "
-            f"({MAX_PROMPT_CANDIDATES}); use the semantic JSON fallback."
-        )
-
-    prompt = _build_classification_prompt(candidates)
-    raw_logprobs = client.chat_with_image_logprobs(
-        model_name=model_name, prompt=prompt, image_path=image_path
-    )
-    if raw_logprobs is None:
-        raise ValueError("Client does not support token logprobs")
-
-    rekeyed = _letters_to_candidates(raw_logprobs, candidates)
-    distribution = softmax_from_logprobs(rekeyed, candidates)
-
-    notes: List[str] = []
-    if not rekeyed and candidates:
-        # No candidate letter appeared in the returned logprobs: softmax
-        # took its uniform fallback, which is not evidence about the image.
-        notes.append(
-            "Model's first token was outside the candidate set; "
-            "uniform fallback applied (not evidence)."
-        )
-
-    return build_score_result(
-        candidates,
-        distribution,
-        SCORING_TIER.LOGPROB,
-        match_types={c: "llm" for c in candidates},
-        notes=notes,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -424,102 +282,7 @@ def score_keywords_embedding(
 
 
 # ---------------------------------------------------------------------------
-# Tier 3 — semantic JSON fallback (not calibrated, self-reported)
-# ---------------------------------------------------------------------------
-
-
-def score_keywords_semantic_json(
-    client: VisionChatClient,
-    model_name: str,
-    image_path: str,
-    candidates: List[str],
-) -> ScoreResult:
-    """Tier 3: VLM self-reported JSON probabilities, clamped + normalized."""
-    if not candidates:
-        return unavailable_result("No candidate keywords supplied.", candidates)
-
-    listing = "\n".join(f'- "{c}"' for c in candidates)
-    prompt = (
-        "Examine the image carefully. You must assign a probability score to "
-        "each of the following candidate keywords based on visual evidence:\n"
-        f"{listing}\n\n"
-        "Requirements:\n"
-        "1. Return valid JSON only. Do not wrap in markdown codeblocks.\n"
-        "2. Provide a float probability between 0.00 and 1.00 for each "
-        "candidate keyword, keyed by the exact candidate text.\n"
-        "3. The sum of all probabilities MUST equal exactly 1.00.\n\n"
-        "Output format:\n"
-        "{\n"
-        '  "candidate one": 0.0,\n'
-        '  "candidate two": 0.0\n'
-        "}"
-    )
-
-    response_text = client.chat_with_image(
-        model_name=model_name, prompt=prompt, image_path=image_path
-    )
-
-    data = extract_dict_from_text(
-        response_text or "",
-        expected_keys=set(candidates),
-    )
-    if not isinstance(data, dict):
-        # Tolerate key-case drift ("Cat" vs "cat"): parse without the exact
-        # key filter and match case-insensitively below. Reject payloads that
-        # contain none of our candidates so a random dict is not silently
-        # turned into a uniform fallback.
-        loose = extract_dict_from_text(response_text or "")
-        if isinstance(loose, dict):
-            casefold_keys = {str(k).strip().casefold() for k in loose}
-            if any(c.strip().casefold() in casefold_keys for c in candidates):
-                data = loose
-    if not isinstance(data, dict):
-        raise ValueError(
-            "Could not parse a JSON probability payload from the model response"
-        )
-
-    # Match JSON keys back to candidates case-insensitively; keys the
-    # model never returned are "unmatched", not zero-by-claim.
-    casefold_index = {str(k).strip().casefold(): v for k, v in data.items()}
-    matched: Dict[str, float] = {}
-    match_types: Dict[str, str] = {}
-    unmatched: List[str] = []
-    for candidate in candidates:
-        key = candidate.strip().casefold()
-        if key in casefold_index:
-            try:
-                matched[candidate] = float(casefold_index[key])
-            except (TypeError, ValueError):
-                matched[candidate] = 0.0
-            match_types[candidate] = "semantic"
-        else:
-            matched[candidate] = 0.0
-            match_types[candidate] = "none"
-            unmatched.append(candidate)
-
-    notes: List[str] = []
-    if unmatched:
-        notes.append(
-            "Model did not return scores for these candidates (treated as "
-            "unmatched, score 0.0): " + ", ".join(unmatched)
-        )
-    notes.append(
-        "Scores are the model's self-reported probabilities (normalized), "
-        "not calibrated logits."
-    )
-
-    normalized = normalize_json_probabilities(matched, candidates)
-    return build_score_result(
-        candidates,
-        normalized,
-        SCORING_TIER.SEMANTIC_JSON,
-        match_types=match_types,
-        notes=notes,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Orchestrator: run the ladder for an engine config
+# Orchestrator: run the ladder for an engine config (local-only)
 # ---------------------------------------------------------------------------
 
 
@@ -530,32 +293,30 @@ def score_keywords(
     *,
     mode: Optional[str] = None,
     local_pipeline: Any = None,
-    logprob_client_factory=None,
-    vision_client_factory=None,
     model_name: str = "",
 ) -> ScoreResult:
-    """Run the tier ladder (1 → 2 → 3 → 0) for the engine's candidate set.
+    """Run the tier ladder (2 → 2.5 → 0) for the engine's candidate set.
+
+    Synapic supports local (LFM) inference only.  The ladder attempts
+    tier 2 (label confidence) and falls back to tier 2.5 (CLIP embedding)
+    rescue when enabled for the engine and the tier-2 pass fails.
 
     Args:
-        engine: ``EngineConfig`` (providers, mode, candidates, threshold).
+        engine: ``EngineConfig`` (mode, candidates, threshold, device).
         image_path: Path to the image being scored.
         candidates: Override for ``engine.probability_candidates``.
         local_pipeline: The already-loaded local pipeline (tier 2). Required
             when the selected tier is ``label_confidence``.
         mode: Optional pre-normalized tagging mode, forwarded to the tier
             selector (see :func:`pick_scoring_tier`).
-        logprob_client_factory: ``() -> (client, model_name) | None`` used to
-            obtain a logprob-capable client for tier 1. ``None``/falsy result
-            downgrades to tier 3.
-        vision_client_factory: ``() -> (client, model_name)`` used to obtain a
-            vision chat client for tier 3.
-        model_name: Optional explicit model name for the chosen client.
+        model_name: Optional explicit model name (unused for local scoring,
+            accepted for API compatibility with callers).
 
     Returns:
         A ScoreResult from the highest tier that ran, or a tier-0
-        ``unavailable_result`` carrying the failure reason. Never raises
+        ``unavailable_result`` carrying the failure reason.  Never raises
         for provider/parse failures — those are recorded and degraded,
-        matching the "hide on failure" pipeline contract. (Programming
+        matching the "hide on failure" pipeline contract.  (Programming
         errors like a bad factory signature may still raise.)
     """
     candidate_list = list(
@@ -570,53 +331,6 @@ def score_keywords(
             "provider, or candidate set).",
             candidate_list,
         )
-
-    # Tier 1: try a logprob-capable client, else fall through to tier 3.
-    if tier == SCORING_TIER.LOGPROB:
-        if logprob_client_factory is not None:
-            try:
-                client, name = logprob_client_factory()
-                if client is not None:
-                    return score_keywords_logprob(
-                        client,
-                        model_name or name,
-                        image_path,
-                        candidate_list,
-                    )
-            except Exception as exc:
-                logger.info(
-                    "Logprob scoring unavailable (%s: %s); falling back to "
-                    "semantic JSON.",
-                    type(exc).__name__,
-                    exc,
-                )
-        tier = SCORING_TIER.SEMANTIC_JSON
-
-    # Tier 3: JSON fallback via any vision chat client.
-    if tier == SCORING_TIER.SEMANTIC_JSON:
-        if vision_client_factory is None:
-            return unavailable_result(
-                "No vision client available for semantic JSON scoring.",
-                candidate_list,
-            )
-        try:
-            client, name = vision_client_factory()
-            return score_keywords_semantic_json(
-                client,
-                model_name or name,
-                image_path,
-                candidate_list,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Semantic JSON scoring failed (%s: %s).",
-                type(exc).__name__,
-                exc,
-            )
-            return unavailable_result(
-                f"Semantic JSON scoring failed: {type(exc).__name__}: {exc}",
-                candidate_list,
-            )
 
     # Tier 2: local pipeline label confidence.
     if tier == SCORING_TIER.LABEL_CONFIDENCE:

@@ -47,9 +47,6 @@ def save_config(session: Session):
             "datasource": asdict(session.datasource),
             "engine": asdict(session.engine)
         }
-        # Remove transient runtime fields that shouldn't be persisted
-        data["engine"].pop("groq_current_key_index", None)
-        data["engine"].pop("groq_exhausted_keys", None)
         
         # Log the configuration being saved (with sensitive data masked)
         log_config("Saving Configuration", data, logger)
@@ -112,6 +109,18 @@ def load_config(session: Session):
                 and getattr(session.engine, "probability_enabled", False)
             ):
                 session.engine.probability_mode = "both"
+
+            # LFM-only migration: legacy configs may have saved a cloud
+            # provider. Synapic tags images with local models only, so any
+            # non-local provider is coerced back to 'local' (the saved
+            # model_id is kept — the user can re-select it in Step 2 if it
+            # is a downloaded local model).
+            if session.engine.provider != "local":
+                logger.info(
+                    f"Migrating legacy provider '{session.engine.provider}' to 'local'"
+                )
+                session.engine.provider = "local"
+
             logger.debug(f"Engine configuration updated: provider={session.engine.provider}, task={session.engine.task}")
                     
         logger.info("Configuration loaded and applied successfully")
