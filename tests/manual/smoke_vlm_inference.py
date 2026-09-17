@@ -1,20 +1,26 @@
 """One-off end-to-end smoke test on transformers 5.x.
 
 Loads LiquidAI/LFM2.5-VL-450M through Synapic's real code path
-(huggingface_utils.load_model_sync) and runs the exact inference call
+(huggingface_utils.load_model) and runs the exact inference call
 processing.py uses for image-text-to-text pipelines on a synthetic image.
+
+Run from the project root:
+    PYTHONPATH=. python tests/manual/smoke_vlm_inference.py
 """
 
 import json
 import logging
+import os
 import queue
 import sys
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw  # noqa: E402
 
-from src.core import huggingface_utils
+from src.core import huggingface_utils  # noqa: E402
 
 MODEL_ID = "LiquidAI/LFM2.5-VL-450M"
 

@@ -57,7 +57,8 @@ class MockCTkToplevel:
     def pack(self, *args, **kwargs): pass
     def winfo_exists(self): return True
     def after(self, ms, func=None):
-        if func: func()
+        if func:
+            func()
 
 class MockCTk(MockCTkToplevel):
     pass
