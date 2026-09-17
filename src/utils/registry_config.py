@@ -23,11 +23,18 @@ It should only be used in environments where the Windows OS is present.
 
 Author: Synapic Project
 """
-import winreg
 import logging
-from typing import Optional, Dict, Any
+import os
+from typing import Any, Dict, Optional
+
+try:
+    import winreg
+except ImportError:  # non-Windows (e.g. CI on Linux); keep the module importable
+    winreg = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+
+_IS_WINDOWS = os.name == "nt" and winreg is not None
 
 # Registry path for Synapic credentials
 REGISTRY_KEY = r"SOFTWARE\Synapic"
@@ -35,7 +42,7 @@ DAMINION_SUBKEY = r"SOFTWARE\Synapic\Daminion"
 UI_PREFS_SUBKEY = r"SOFTWARE\Synapic\UIPreferences"
 
 
-def _get_or_create_key(key_path: str) -> winreg.HKEYType:
+def _get_or_create_key(key_path: str) -> "winreg.HKEYType":
     """Get or create a registry key."""
     try:
         return winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_ALL_ACCESS)
@@ -132,6 +139,8 @@ def credentials_exist() -> bool:
     Returns:
         bool: True if the Daminion subkey can be opened for reading.
     """
+    if winreg is None:
+        return False
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, DAMINION_SUBKEY, 0, winreg.KEY_READ):
             return True
