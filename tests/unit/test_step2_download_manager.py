@@ -37,6 +37,8 @@ def _make_dialog():
     dialog._size_filter_min = 0
     dialog._size_filter_max = 0
     dialog._size_filter_active_max = 0
+    dialog._download_rows = {}
+    dialog._download_queues = {}
     dialog.search_filter_var = MagicMock()
     dialog.search_filter_var.get.return_value = "multimodal"
 

@@ -72,9 +72,6 @@ import platform
 import torch
 from typing import Optional, Dict, Any, List, Tuple
 
-# Windows compatibility: Disable symlinks to avoid permission errors
-# On Windows without Developer Mode, symlink creation fails with WinError 1314
-_USE_SYMLINKS = "auto" if os.name != "nt" else False
 _LOCAL_INFERENCE_COMPAT_CACHE: Dict[Tuple[str, str], Optional[str]] = {}
 
 
@@ -272,9 +269,10 @@ def get_local_inference_incompatibility_reason(
 
     if task in (config.MODEL_TASK_IMAGE_CLASSIFICATION, config.MODEL_TASK_ZERO_SHOT):
         if not processor_ok and not image_processor_ok:
+            detail = str(processor_error)[:160] if processor_error else "unknown error"
             reason = (
                 f"Missing a compatible image processor in the installed Transformers version "
-                f"({type(processor_error).__name__ if processor_error else 'unknown error'})"
+                f"({type(processor_error).__name__}: {detail})"
             )
             if token is None:
                 _LOCAL_INFERENCE_COMPAT_CACHE[cache_key] = reason
@@ -283,9 +281,10 @@ def get_local_inference_incompatibility_reason(
         try:
             AutoTokenizer.from_pretrained(source, trust_remote_code=False, token=token)
         except Exception as tokenizer_error:
+            detail = str(tokenizer_error)[:160]
             reason = (
                 "Missing a compatible processor/tokenizer for local inference "
-                f"({type(tokenizer_error).__name__})"
+                f"({type(tokenizer_error).__name__}: {detail})"
             )
             if token is None:
                 _LOCAL_INFERENCE_COMPAT_CACHE[cache_key] = reason
@@ -509,7 +508,6 @@ def _download_missing_files_with_progress(model_id: str, q, token=None) -> str:
         local_model_path = snapshot_download(
             repo_id=model_id,
             token=token,
-            local_dir_use_symlinks=_USE_SYMLINKS,
         )
         q.put(("model_download_progress", (1, 1)))
         return local_model_path
@@ -538,7 +536,6 @@ def _download_missing_files_with_progress(model_id: str, q, token=None) -> str:
             repo_id=model_id,
             tqdm_class=SilentTqdm,  # type: ignore[arg-type]
             token=token,
-            local_dir_use_symlinks=_USE_SYMLINKS,
         )
         logging.info(f"[Download] {model_id}: snapshot_download returned {local_model_path}")
     except Exception as e:
@@ -951,7 +948,6 @@ def _legacy_download_model_worker(model_id, q, token=None):
             repo_id=model_id,
             tqdm_class=SilentTqdm,  # type: ignore[arg-type]
             token=token,
-            local_dir_use_symlinks=_USE_SYMLINKS,
         )
 
         # Final update to ensure it hits 100%
@@ -984,7 +980,6 @@ def _legacy_load_model_with_progress(model_id, task, q, token=None, device=-1):
                 repo_id=model_id,
                 tqdm_class=SilentTqdm,
                 token=token,
-                local_dir_use_symlinks=_USE_SYMLINKS,
             )
             q.put(("model_download_progress", (total_missing, total_missing)))
         else:
@@ -997,7 +992,6 @@ def _legacy_load_model_with_progress(model_id, task, q, token=None, device=-1):
                     repo_id=model_id,
                     tqdm_class=SilentTqdm,
                     token=token,
-                    local_dir_use_symlinks=_USE_SYMLINKS,
                 )
 
         q.put(("status_update", f"Initializing model {model_id}..."))
@@ -1032,7 +1026,7 @@ def _legacy_load_model_with_progress(model_id, task, q, token=None, device=-1):
             model=local_model_path,
             device_map="auto" if device != -1 else None,
             device=device if device == -1 else None,
-            torch_dtype="auto",
+            dtype="auto",
             model_kwargs={"low_cpu_mem_usage": True},
         )
 
@@ -1088,7 +1082,6 @@ def load_model_with_progress(model_id, task, q, token=None, device=-1):
                     repo_id=model_id,
                     tqdm_class=SilentTqdm,  # type: ignore[arg-type]
                     token=token,
-                    local_dir_use_symlinks=_USE_SYMLINKS,
                 )
 
         q.put(("status_update", f"Initializing model {model_id}..."))
@@ -1118,7 +1111,7 @@ def load_model_with_progress(model_id, task, q, token=None, device=-1):
             model=local_model_path,
             device_map="auto" if device != -1 else None,
             device=device if device == -1 else None,
-            torch_dtype="auto",
+            dtype="auto",
             model_kwargs={"low_cpu_mem_usage": True},
         )
 
@@ -1234,7 +1227,6 @@ def load_model(
                     repo_id=model_id,
                     tqdm_class=SilentTqdm,  # type: ignore[arg-type]
                     token=token,
-                    local_dir_use_symlinks=_USE_SYMLINKS,
                 )
             logging.info(f"Model download complete for {model_id} (sync).")
         else:
@@ -1253,7 +1245,6 @@ def load_model(
                     repo_id=model_id,
                     tqdm_class=SilentTqdm,
                     token=token,
-                    local_dir_use_symlinks=_USE_SYMLINKS,
                 )
 
         if q:
@@ -1341,7 +1332,7 @@ def load_model(
         # Load model using memory optimizations:
         # - low_cpu_mem_usage: reduces peak RAM (passed via model_kwargs to avoid
         #   _sanitize_parameters() rejection in task-specific pipelines)
-        # - torch_dtype="auto": uses float16 on GPU if available
+        # - dtype="auto": uses float16 on GPU if available
         # - device_map="auto": handles complex device placement (requires accelerate)
         model = pipeline(
             pipeline_task,
@@ -1349,7 +1340,7 @@ def load_model(
             processor=processor,
             device_map="auto" if device != -1 else None,
             device=device if device == -1 else None,
-            torch_dtype="auto",
+            dtype="auto",
             model_kwargs={"low_cpu_mem_usage": True},
         )
 

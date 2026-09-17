@@ -337,8 +337,16 @@ class DownloadManagerDialog(ctk.CTkToplevel):
         self.title("Download Models from Hugging Face Hub")
         self.geometry("800x600")
 
-        # Background worker for thread management (single persistent thread)
+        # Background workers for thread management (single persistent threads):
+        # - _worker: Hub searches / prefetches
+        # - _downloads_worker: serial download queue (one download at a time)
         self._worker = BackgroundWorker(name="DownloadManagerWorker")
+        self._downloads_worker = BackgroundWorker(name="DownloadQueueWorker")
+
+        # Per-row download UI state: model_id -> row widget references
+        self._download_rows = {}
+        # Active download queues: model_id -> queue.Queue polled on the UI thread
+        self._download_queues = {}
 
         # Make the dialog modal or at least ensuring it stays on top
         self.transient(parent)
@@ -685,45 +693,79 @@ class DownloadManagerDialog(ctk.CTkToplevel):
         # Consistent column-like look
         display_text = f"{model_id:<40} | {capability:^15} | {size_str:>10}"
 
-        ctk.CTkLabel(
+        label = ctk.CTkLabel(
             frame,
             text=display_text,
             font=("Courier New", 12),
             anchor="w"
-        ).pack(side="left", padx=10, fill="x", expand=True)
+        )
+        label.pack(side="left", padx=10, fill="x", expand=True)
+
+        # Progress bar overlaid on the model label (left of the Download button).
+        # Hidden until a download starts; shown with the % text while active.
+        row_progress = ctk.CTkProgressBar(frame, width=140)
+        row_progress.set(0)
+        row_progress.pack(side="left", padx=(0, 10))
+        row_progress.pack_forget()
 
         # Buttons
-        btn_select = ctk.CTkButton(frame, text="Select", width=100, fg_color="#3B8ED0",
-                                   command=lambda m=model_id: self.select_remote_model(m))
-        btn_select.pack(side="right", padx=5)
-
         btn_download = ctk.CTkButton(frame, text="Download", width=100, fg_color="#2FA572",
                                      command=lambda m=model_id: self.start_download(m))
         btn_download.pack(side="right", padx=5)
 
-    def select_remote_model(self, model_id):
-        """Select a Hub model for local inference without downloading it."""
-        local_tab = self.local_tab
-        if local_tab is None or not hasattr(local_tab, 'local_model_var'):
-            self.lbl_status.configure(text="Cannot select model from this context.", text_color="red")
+        self._download_rows[model_id] = {"progress": row_progress, "button": btn_download, "label": label}
+
+        # Restore visual state for a model that is queued or downloading
+        # (e.g. after the results list was re-rendered mid-download).
+        if model_id in self._download_queues:
+            self._mark_row_downloading(model_id)
+
+    def _mark_row_downloading(self, model_id):
+        """Switch a result row into its downloading visual state."""
+        row = self._download_rows.get(model_id)
+        if not row:
             return
-        local_tab.local_model_var.set(model_id)
-        if hasattr(local_tab, 'select_local_model'):
-            local_tab.select_local_model(model_id)
-        self.lbl_status.configure(text=f"Selected {model_id} for local inference.", text_color="green")
+        row["progress"].pack_forget()
+        row["progress"].pack(side="left", padx=(0, 10), before=row["button"])
+        row["button"].configure(state="disabled", text="Queued...")
+
+    def _set_row_progress(self, model_id, fraction):
+        """Update the row's progress bar and button label (UI thread only)."""
+        row = self._download_rows.get(model_id)
+        if not row:
+            return
+        pct = max(0, min(100, int(round(fraction * 100))))
+        row["progress"].set(max(0.0, min(1.0, fraction)))
+        row["button"].configure(text=f"{pct}%")
+
+    def _reset_row(self, model_id):
+        """Restore a row to its idle state after a download ends."""
+        row = self._download_rows.get(model_id)
+        if not row:
+            return
+        row["progress"].pack_forget()
+        row["progress"].set(0)
+        row["button"].configure(state="normal", text="Download")
 
     def start_download(self, model_id):
-        self.lbl_status.configure(text=f"Preparing download for {model_id}...", text_color="gray")
-        self.progress.set(0)
+        if model_id in self._download_queues:
+            self.lbl_status.configure(
+                text=f"{model_id} is already downloading.", text_color="gray"
+            )
+            return
 
-        self.download_queue = queue.Queue()
-        self._worker.submit(
+        self.lbl_status.configure(text=f"Preparing download for {model_id}...", text_color="gray")
+
+        download_queue = queue.Queue()
+        self._download_queues[model_id] = download_queue
+        self._mark_row_downloading(model_id)
+        self._downloads_worker.submit(
             self._prepare_and_download_model,
             model_id,
-            self.download_queue
+            download_queue
         )
 
-        self.poll_download_queue()
+        self.poll_download_queue(model_id)
 
     def _prepare_and_download_model(self, model_id, download_queue):
         import logging
@@ -744,34 +786,50 @@ class DownloadManagerDialog(ctk.CTkToplevel):
         logger.info(f"[DownloadManager] Starting download_model_worker for {model_id}")
         huggingface_utils.download_model_worker(model_id, download_queue)
 
-    def poll_download_queue(self):
+    def _finish_download(self, model_id, status_text, status_color):
+        """Shared cleanup when a download ends (complete, error, or incompatible)."""
+        self._download_queues.pop(model_id, None)
+        self._reset_row(model_id)
+        if status_text:
+            self.lbl_status.configure(text=status_text, text_color=status_color)
+
+    def poll_download_queue(self, model_id):
         import logging
         _logger = logging.getLogger(__name__)
+
+        download_queue = self._download_queues.get(model_id)
+        if download_queue is None:
+            return  # Download was finished/cleaned up
+
         try:
             while True:
-                msg_type, data = self.download_queue.get_nowait()
+                msg_type, data = download_queue.get_nowait()
                 _logger.info(f"[DownloadManager] Queue message: {msg_type} (data={data!r:.200})" if isinstance(data, str) else f"[DownloadManager] Queue message: {msg_type}")
 
                 if msg_type == "model_download_progress":
                     downloaded, total = data
                     if total > 0:
-                        self.progress.set(downloaded / total)
+                        self._set_row_progress(model_id, downloaded / total)
 
                 elif msg_type == "status_update":
                     self.lbl_status.configure(text=data, text_color="gray")
 
                 elif msg_type == "download_complete":
                     _logger.info(f"[DownloadManager] Download complete: {data}")
-                    self.on_download_complete(data)
+                    self.on_download_complete(model_id)
                     return
 
                 elif msg_type == "incompatible_model":
-                    model_id, reason = data
-                    self.lbl_status.configure(text=f"Cannot download {model_id}: {reason}", text_color="red")
+                    incompatible_id, reason = data
+                    self._finish_download(
+                        model_id,
+                        f"Cannot download {incompatible_id}: {reason}",
+                        "red",
+                    )
                     import tkinter.messagebox as mb
                     mb.showerror(
                         "Incompatible Model",
-                        f"The model '{model_id}' cannot be used with Synapic.\n\n"
+                        f"The model '{incompatible_id}' cannot be used with Synapic.\n\n"
                         f"Reason: {reason}\n\n"
                         "This model is not suitable for Synapic's local inference runtime.\n"
                         "Please choose a different model."
@@ -779,16 +837,18 @@ class DownloadManagerDialog(ctk.CTkToplevel):
                     return
 
                 elif msg_type == "error":
-                    self.lbl_status.configure(text=f"Download failed: {data}", text_color="red")
+                    self._finish_download(
+                        model_id, f"Download failed: {data}", "red"
+                    )
                     return  # Stop polling
 
         except queue.Empty:
-            # Continue polling if not closed
-            if self.winfo_exists():
-                self.after(100, self.poll_download_queue)
+            # Continue polling while the download is still active
+            if self._download_queues.get(model_id) is not None and self.winfo_exists():
+                self.after(100, self.poll_download_queue, model_id)
 
     def on_download_complete(self, model_id):
-        self.lbl_status.configure(text=f"Download complete: {model_id}!", text_color="green")
+        self._finish_download(model_id, f"Download complete: {model_id}!", "green")
         self.progress.set(1.0)
 
         # Auto-select the downloaded model for local inference
@@ -815,7 +875,9 @@ class DownloadManagerDialog(ctk.CTkToplevel):
                 self.local_tab.local_model_var.set(model_id)
 
     def destroy(self):
-        """Override destroy to clean up worker thread."""
+        """Override destroy to clean up worker threads."""
         if hasattr(self, '_worker'):
             self._worker.shutdown()
+        if hasattr(self, '_downloads_worker'):
+            self._downloads_worker.shutdown()
         super().destroy()

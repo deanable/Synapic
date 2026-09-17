@@ -23,6 +23,15 @@ import importlib.util
 # -------------------------------------------------------------------------
 module_mock = MagicMock()
 
+# Preserve the real modules so they can be restored right after the imports
+# below. Replacing sys.modules["customtkinter"] permanently leaks into every
+# other test module imported afterwards in the same pytest session (e.g. later
+# MagicMock calls failing with "issubclass() arg 1 must be a class").
+_real_customtkinter = sys.modules.get("customtkinter")
+_real_tkinter = sys.modules.get("tkinter")
+_real_tkinter_messagebox = sys.modules.get("tkinter.messagebox")
+_real_pil_imagetk = sys.modules.get("PIL.ImageTk")
+
 # Define a real class for CTkFrame so inheritance works normally
 class MockCTkFrame:
     """Tiny stand-in base class that satisfies the widget API used by the tests."""
@@ -37,6 +46,24 @@ class MockCTkFrame:
         return "timer_id"
 
 module_mock.CTkFrame = MockCTkFrame
+
+# Inert stand-ins for every ctk base class used in src/ui. These must be real
+# classes (not MagicMocks): UI modules subclass them at import time, and a
+# MagicMock base silently turns the subclass into a MagicMock *instance*,
+# breaking later tests that import those classes (e.g. DownloadManagerDialog).
+class MockCTkToplevel:
+    def __init__(self, *args, **kwargs): pass
+    def grid(self, *args, **kwargs): pass
+    def pack(self, *args, **kwargs): pass
+    def winfo_exists(self): return True
+    def after(self, ms, func=None):
+        if func: func()
+
+class MockCTk(MockCTkToplevel):
+    pass
+
+module_mock.CTkToplevel = MockCTkToplevel
+module_mock.CTk = MockCTk
 sys.modules["customtkinter"] = module_mock
 sys.modules["tkinter"] = MagicMock()
 sys.modules["tkinter.messagebox"] = MagicMock()
@@ -47,6 +74,20 @@ if importlib.util.find_spec("PIL.ImageTk") is None:
 from src.ui.steps.step1_datasource import Step1Datasource  # noqa: E402
 from src.ui.steps.step_dedup import StepDedup  # noqa: E402
 import src.ui.steps.step1_datasource as step1_module  # noqa: E402
+
+# Restore the real UI modules now that the step modules above have bound the
+# mock objects into their own namespaces. Method-level `import tkinter.messagebox`
+# statements executed later will resolve the real modules, which is fine.
+for _name, _module in (
+    ("customtkinter", _real_customtkinter),
+    ("tkinter", _real_tkinter),
+    ("tkinter.messagebox", _real_tkinter_messagebox),
+    ("PIL.ImageTk", _real_pil_imagetk),
+):
+    if _module is not None:
+        sys.modules[_name] = _module
+    else:
+        sys.modules.pop(_name, None)
 
 # -------------------------------------------------------------------------
 # TESTABLE SUBCLASSES (Avoids UI Init)

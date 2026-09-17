@@ -32,7 +32,7 @@ class TestModelLoadingParams(unittest.TestCase):
         # Verify pipeline was called with optimizations
         args, kwargs = mock_pipeline.call_args
         self.assertEqual(kwargs.get('model_kwargs', {}).get('low_cpu_mem_usage'), True)
-        self.assertEqual(kwargs.get('torch_dtype'), "auto")
+        self.assertEqual(kwargs.get('dtype'), "auto")
         self.assertEqual(kwargs.get('device_map'), "auto")
         self.assertIsNone(kwargs.get('device'))
 
@@ -51,7 +51,7 @@ class TestModelLoadingParams(unittest.TestCase):
         # Verify pipeline was called with optimizations but NO device_map for CPU
         args, kwargs = mock_pipeline.call_args
         self.assertEqual(kwargs.get('model_kwargs', {}).get('low_cpu_mem_usage'), True)
-        self.assertEqual(kwargs.get('torch_dtype'), "auto")
+        self.assertEqual(kwargs.get('dtype'), "auto")
         self.assertIsNone(kwargs.get('device_map'))
         self.assertEqual(kwargs.get('device'), -1)
 

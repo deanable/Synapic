@@ -72,6 +72,7 @@ def test_vector_database_initialization():
             
             # Mock FAISS index
             mock_index = MagicMock()
+            mock_index.ntotal = 0
             mock_faiss.IndexFlatL2.return_value = mock_index
             mock_faiss.read_index.side_effect = FileNotFoundError()
             
@@ -90,7 +91,10 @@ def test_text_embedder_initialization():
         
         # Mock SentenceTransformer
         mock_model = MagicMock()
-        mock_model.encode.return_value = [[0.1, 0.2, 0.3]]  # 3D embedding for testing
+        # encode() returns a 2D array (n, dim); .shape[1] is read after loading
+        encoded = MagicMock()
+        encoded.shape = (1, 384)
+        mock_model.encode.return_value = encoded
         mock_st.return_value = mock_model
         
         from src.core.vector_embedder import TextEmbedder
