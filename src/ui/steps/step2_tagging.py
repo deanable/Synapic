@@ -591,7 +591,17 @@ class DownloadManagerDialog(ctk.CTkToplevel):
 
     def show_search_results(self, results, refresh_size_filter=True):
         self._search_results_cache = list(results or [])
-        if refresh_size_filter:
+        # The first pass of a search renders "Loading..." placeholder sizes
+        # (all zero), which pins the size-filter max to 0. When the real sizes
+        # arrive in the second pass (refresh_size_filter=False), the filter
+        # bounds must be re-derived, otherwise every model with size_bytes > 0
+        # is filtered out and the result list goes empty. Once real bounds
+        # exist, leave the user's slider position untouched.
+        has_real_size_data = any(
+            int(item.get("size_bytes", 0) or 0) > 0
+            for item in self._search_results_cache
+        )
+        if refresh_size_filter or (has_real_size_data and self._size_filter_max <= 0):
             self._configure_size_filter(self._search_results_cache)
         filtered_results = self._get_size_filtered_results()
         self.lbl_status.configure(
